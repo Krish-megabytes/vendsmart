@@ -17,7 +17,7 @@ type ApiResponse<T> = { success: boolean; data: T; error?: { message: string; co
 type Recommendation = { product: Product; available?: number; score: number }
 type RecommendationResponse = { intent: { categories: string[]; tags: string[]; maxPrice?: number; words: string[] }; recommendations: Recommendation[] }
 
-const API = (import.meta.env.VITE_API_URL || 'http://localhost:5000/api').replace(/\/$/, '')
+const API = (import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:5000/api' : '/api')).replace(/\/$/, '')
 const STORAGE_KEY = 'vendsmart.session.v1'
 const COMPLAINT_CATEGORIES: { value: string; label: string }[] = [
   { value: 'ORDER', label: 'Problem with an order or pickup' },

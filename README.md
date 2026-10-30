@@ -55,3 +55,19 @@ cd ../client && npm run build
 ```
 
 The database seed and full reservation/role flows require a reachable MongoDB instance. See [server/API.md](server/API.md) for routes, permissions and reservation behavior.
+
+## Deploy to Vercel
+
+The root Vercel project serves the Vite client and routes `/api/*` requests through a serverless Express function. Before deploying, create a production MongoDB database and configure these Vercel environment variables for the target environment:
+
+- `MONGODB_URI`: production MongoDB connection string
+- `JWT_SECRET`: a private random secret of at least 32 characters
+
+Authenticate the Vercel CLI, then deploy from the repository root:
+
+```sh
+npx vercel login
+npx vercel deploy --prod
+```
+
+The production frontend calls the API at `/api` on the same deployment. If the frontend is hosted on a different origin, also set `CLIENT_URL` to that exact origin. Payment remains simulated; do not collect real payment details on a public deployment.

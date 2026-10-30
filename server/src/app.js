@@ -10,15 +10,17 @@ const app = express();
 app.use(helmet());
 const allowedClientOrigins = new Set([process.env.CLIENT_URL || 'http://localhost:5173']);
 const isLocalDevOrigin = (origin) => /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin || '');
-app.use(cors({
+app.use((req, res, next) => cors({
   origin: (origin, callback) => {
+    const host = req.get('host');
+    const isSameOrigin = origin === `https://${host}` || origin === `http://${host}`;
     // Vite picks the next free port when 5173 is taken, so accept any loopback
-    // origin while developing; production still requires an exact CLIENT_URL match.
-    const allowed = !origin || allowedClientOrigins.has(origin) || (process.env.NODE_ENV !== 'production' && isLocalDevOrigin(origin));
+    // origin while developing; production cross-origin requests require CLIENT_URL.
+    const allowed = !origin || allowedClientOrigins.has(origin) || isSameOrigin || (process.env.NODE_ENV !== 'production' && isLocalDevOrigin(origin));
     callback(null, allowed);
   },
   credentials: true,
-}));
+})(req, res, next));
 app.use(express.json({ limit: '32kb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
