@@ -1,0 +1,116 @@
+◇ injected env (7) from .env
+MongoDB Connected: 127.0.0.1 / vendsmart
+MongoDB connected successfully.
+Server running in development mode on port 5000
+[0mGET /health [32m200[0m 1.757 ms - 53[0m
+[0mGET /api/machines [32m200[0m 13.123 ms - 26[0m
+[0mGET /api/reservations [33m401[0m 0.648 ms - 82[0m
+[0mGET /api/machines [32m200[0m 6.367 ms - 26[0m
+[0mGET /api/products? [32m200[0m 4.431 ms - 26[0m
+[0mGET /api/machines [32m200[0m 2.060 ms - 26[0m
+[0mGET /api/products [32m200[0m 1.729 ms - 26[0m
+[0mGET /api/reservations [33m401[0m 0.300 ms - 82[0m
+[0mGET /api/machines [32m200[0m 51.925 ms - 5965[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617b [32m200[0m 6.257 ms - 3994[0m
+[0mGET /api/reservations [33m401[0m 0.522 ms - 82[0m
+[0mGET /api/machines [32m200[0m 15.452 ms - 5965[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617b [32m200[0m 5.296 ms - 3994[0m
+[0mGET /api/reservations [33m401[0m 0.222 ms - 82[0m
+[0mGET /api/machines [36m304[0m 9.749 ms - -[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617b [36m304[0m 6.958 ms - -[0m
+[0mGET /api/reservations [33m401[0m 0.249 ms - 82[0m
+[0mGET /api/machines [36m304[0m 11.205 ms - -[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617b [36m304[0m 6.343 ms - -[0m
+[0mPOST /api/auth/login [32m200[0m 71.787 ms - 315[0m
+[0mGET /api/favorites [32m200[0m 11.396 ms - 26[0m
+[0mGET /api/complaints [32m200[0m 11.931 ms - 26[0m
+[0mGET /api/reservations [32m200[0m 16.813 ms - 26[0m
+[0mGET /api/machines [36m304[0m 19.899 ms - -[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617b [36m304[0m 5.932 ms - -[0m
+[0mPOST /api/auth/login [32m200[0m 96.563 ms - 315[0m
+[0mGET /api/favorites [36m304[0m 26.749 ms - -[0m
+[0mGET /api/machines [36m304[0m 32.737 ms - -[0m
+[0mGET /api/complaints [36m304[0m 21.921 ms - -[0m
+[0mGET /api/reservations [36m304[0m 36.276 ms - -[0m
+[0mGET /api/products [32m200[0m 13.556 ms - 3817[0m
+[0mGET /api/inventory [32m200[0m 70.097 ms - 66603[0m
+[0mGET /api/forecast?days=30 [32m200[0m 87.465 ms - 47109[0m
+[0mGET /api/overview [32m200[0m 126.000 ms - 2552[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617b [36m304[0m 6.390 ms - -[0m
+[0mPOST /api/auth/login [32m200[0m 92.374 ms - 306[0m
+[0mGET /api/products [36m304[0m 10.336 ms - -[0m
+[0mGET /api/favorites [36m304[0m 17.444 ms - -[0m
+[0mGET /api/complaints [36m304[0m 17.802 ms - -[0m
+[0mGET /api/reservations [36m304[0m 26.738 ms - -[0m
+[0mGET /api/machines [36m304[0m 31.808 ms - -[0m
+[0mGET /api/inventory [36m304[0m 51.059 ms - -[0m
+[0mGET /api/forecast?days=30 [36m304[0m 57.726 ms - -[0m
+[0mGET /api/overview [36m304[0m 89.037 ms - -[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617b [36m304[0m 4.361 ms - -[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617d [32m200[0m 5.117 ms - 3997[0m
+(node:22768) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:22768) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+[0mPOST /api/reservations [32m201[0m 37.868 ms - 772[0m
+(node:22768) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+[0mPOST /api/reservations/6ae4929171f1c48c99872058/pay [32m200[0m 9.165 ms - 787[0m
+[0mGET /api/favorites [36m304[0m 11.419 ms - -[0m
+[0mGET /api/complaints [36m304[0m 10.993 ms - -[0m
+[0mGET /api/machines [32m200[0m 18.482 ms - 5965[0m
+[0mGET /api/reservations [32m200[0m 21.083 ms - 920[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617d [32m200[0m 5.325 ms - 3997[0m
+(node:22768) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+[0mPOST /api/reservations/6ae4929171f1c48c99872058/dispense [32m200[0m 9.108 ms - 806[0m
+[0mGET /api/favorites [36m304[0m 10.882 ms - -[0m
+[0mGET /api/complaints [36m304[0m 9.816 ms - -[0m
+[0mGET /api/machines [36m304[0m 17.382 ms - -[0m
+[0mGET /api/reservations [32m200[0m 16.981 ms - 945[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617d [36m304[0m 3.164 ms - -[0m
+[0mGET /api/favorites [36m304[0m 15.594 ms - -[0m
+[0mGET /api/complaints [36m304[0m 15.079 ms - -[0m
+[0mGET /api/machines [36m304[0m 23.785 ms - -[0m
+[0mGET /api/reservations [36m304[0m 24.056 ms - -[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617b [36m304[0m 5.832 ms - -[0m
+[0mGET /api/favorites [36m304[0m 12.675 ms - -[0m
+[0mGET /api/complaints [36m304[0m 12.772 ms - -[0m
+[0mGET /api/machines [36m304[0m 21.125 ms - -[0m
+[0mGET /api/reservations [36m304[0m 22.655 ms - -[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617b [36m304[0m 3.932 ms - -[0m
+[0mPOST /api/complaints [32m201[0m 6.473 ms - 336[0m
+[0mGET /api/complaints [32m200[0m 6.163 ms - 403[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617d [36m304[0m 3.311 ms - -[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617d [36m304[0m 5.092 ms - -[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617e [32m200[0m 4.281 ms - 3994[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617e [36m304[0m 5.107 ms - -[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617d [32m200[0m 4.173 ms - 3997[0m
+(node:22768) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+(node:22768) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+[0mPOST /api/reservations [32m201[0m 15.018 ms - 772[0m
+(node:22768) [MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: 'after'` instead.
+[0mPOST /api/reservations/6ae4957b71f1c48c9987206a/pay [32m200[0m 4.735 ms - 787[0m
+[0mGET /api/favorites [36m304[0m 8.699 ms - -[0m
+[0mGET /api/reservations [32m200[0m 17.347 ms - 1840[0m
+[0mGET /api/complaints [36m304[0m 13.564 ms - -[0m
+[0mGET /api/machines [32m200[0m 16.498 ms - 5965[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617e [32m200[0m 4.485 ms - 3994[0m
+[0mGET /api/reservations [33m401[0m 17.900 ms - 90[0m
+[0mGET /api/favorites [33m401[0m 0.713 ms - 90[0m
+[0mGET /api/complaints [33m401[0m 0.677 ms - 90[0m
+[0mGET /api/inventory [33m401[0m 29.015 ms - 90[0m
+[0mGET /api/forecast?days=30 [33m401[0m 20.948 ms - 90[0m
+[0mGET /api/overview [33m401[0m 1.025 ms - 90[0m
+[0mGET /api/products [36m304[0m 245.495 ms - -[0m
+[0mGET /api/machines [36m304[0m 477.089 ms - -[0m
+[0mGET /api/reservations [33m401[0m 0.327 ms - 82[0m
+[0mGET /api/machines [32m200[0m 44.837 ms - 5965[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617b [36m304[0m 17.846 ms - -[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617b [36m304[0m 6.075 ms - -[0m
+[0mGET /api/reservations [33m401[0m 4.371 ms - 90[0m
+[0mGET /api/favorites [33m401[0m 3.262 ms - 90[0m
+[0mGET /api/complaints [33m401[0m 3.270 ms - 90[0m
+[0mGET /api/overview [33m401[0m 1.267 ms - 90[0m
+[0mGET /api/inventory [33m401[0m 1.121 ms - 90[0m
+[0mGET /api/forecast?days=30 [33m401[0m 0.891 ms - 90[0m
+[0mGET /api/machines [36m304[0m 65.828 ms - -[0m
+[0mGET /api/products [36m304[0m 13.585 ms - -[0m
+[0mGET /api/products?machineId=6ae491a674a9bd284845617b [36m304[0m 8.174 ms - -[0m
