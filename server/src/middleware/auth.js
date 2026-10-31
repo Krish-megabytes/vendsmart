@@ -35,6 +35,22 @@ const protect = async (req, res, next) => {
   }
 };
 
+const optionalProtect = async (req, res, next) => {
+  const authorization = req.headers.authorization;
+  if (!authorization) return next();
+  if (!authorization.startsWith('Bearer ')) return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Token failed, not authorized' } });
+  try {
+    if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) return res.status(503).json({ success: false, error: { code: 'AUTH_NOT_CONFIGURED', message: 'Authentication is not configured securely on this server.' } });
+    const decoded = jwt.verify(authorization.split(' ')[1], process.env.JWT_SECRET);
+    req.user = await User.findById(decoded.id).select('-passwordHash');
+    if (!req.user) return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'User not found' } });
+    if (req.user.banned) return res.status(403).json({ success: false, error: { code: 'ACCOUNT_BANNED', message: 'This account has been suspended by an administrator.' } });
+    return next();
+  } catch {
+    return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Token failed, not authorized' } });
+  }
+};
+
 // Grant access to specific roles
 const authorize = (...roles) => {
   return (req, res, next) => {
@@ -48,4 +64,4 @@ const authorize = (...roles) => {
   };
 };
 
-module.exports = { protect, authorize };
+module.exports = { protect, optionalProtect, authorize };

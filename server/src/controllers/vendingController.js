@@ -12,6 +12,8 @@ const { syncOperationalAlerts } = require('../utils/inventoryAlerts');
 const { releaseExpiredReservations } = require('../utils/reservationExpiry');
 const { parseProductIntent, rankProduct } = require('../utils/recommendations');
 const { digestPickupCode, encryptPickupCode, decryptPickupCode, verifyPickupCode } = require('../utils/pickupCode');
+const { parseExpirationDate, isExpired, isNearExpiry, availableQuantity, discountedPrice, dateOnly } = require('../utils/productExpiry');
+const { recordAdminAudit } = require('../utils/adminAudit');
 
 const success = (res, data, status = 200) => res.status(status).json({ success: true, data });
 const fail = (res, status, code, message) => res.status(status).json({ success: false, error: { code, message } });
@@ -21,18 +23,53 @@ const paymentReferenceCode = () => `PAY-${crypto.randomBytes(4).toString('hex').
 const complaintCode = () => `VC-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
 const COMPLAINT_CATEGORIES = ['ORDER', 'PAYMENT', 'MACHINE', 'OTHER'];
 
+async function findExpiredReservationItem(reservation, now = new Date()) {
+  for (const item of reservation.items) {
+    const stock = await Inventory.findOne({ machine: reservation.machine, product: item.product }).select('expirationDate');
+    if (stock && isExpired(stock.expirationDate, now)) return item;
+  }
+  return null;
+}
+
+async function expireReservationForProduct(reservation, now = new Date()) {
+  const refund = reservation.status === 'PAID'
+    ? { refundedAt: now, refundAmount: Math.round((reservation.total || 0) * 100) / 100 }
+    : {};
+  const result = await Reservation.updateOne(
+    { _id: reservation._id, status: reservation.status },
+    { $set: { status: 'EXPIRED', cancelledAt: now, ...refund }, $unset: { otpHash: 1, pickupOtp: 1 } },
+  );
+  if (!result.modifiedCount) return false;
+  for (const item of reservation.items) {
+    await Inventory.updateOne(
+      { machine: reservation.machine, product: item.product, reserved: { $gte: item.quantity } },
+      { $inc: { reserved: -item.quantity } },
+    );
+  }
+  return true;
+}
+
 // Per-machine stock rollup used by the storefront's recommended-machine card.
 const machineStockSummaries = async (machineIds) => {
   if (!machineIds.length) return new Map();
-  const rows = await Inventory.aggregate([
-    { $match: { machine: { $in: machineIds } } },
-    { $lookup: { from: 'products', localField: 'product', foreignField: '_id', as: 'productDoc' } },
-    { $unwind: '$productDoc' },
-    { $addFields: { availableUnits: { $max: [0, { $subtract: ['$quantity', '$reserved'] }] } } },
-    { $sort: { availableUnits: -1 } },
-    { $group: { _id: '$machine', available: { $sum: '$availableUnits' }, topProduct: { $first: { name: '$productDoc.name', price: '$productDoc.price', available: '$availableUnits' } } } },
-  ]);
-  return new Map(rows.map(row => [String(row._id), { availableUnits: row.available, topProduct: row.topProduct }]));
+  const rows = await Inventory.find({ machine: { $in: machineIds } }).populate('product', 'name price').lean();
+  const summaries = new Map();
+  for (const row of rows) {
+    if (!row.product) continue;
+    const availableUnits = availableQuantity(row);
+    const current = summaries.get(String(row.machine)) || { availableUnits: 0, topProduct: null };
+    current.availableUnits += availableUnits;
+    if (availableUnits > 0 && (!current.topProduct || availableUnits > current.topProduct.available)) {
+      current.topProduct = {
+        name: row.product.name,
+        ...discountedPrice(row.product, row),
+        available: availableUnits,
+        expirationDate: dateOnly(row.expirationDate),
+      };
+    }
+    summaries.set(String(row.machine), current);
+  }
+  return summaries;
 };
 
 exports.listMachines = async (req, res, next) => {
@@ -62,8 +99,24 @@ exports.createMachine = async (req, res, next) => {
   try {
     const { name, code, description, address, latitude, longitude, capacity, vendorId } = req.body;
     if (typeof name !== 'string' || name.trim().length < 2 || name.length > 100 || typeof code !== 'string' || !/^[a-z0-9-]{3,30}$/i.test(code) || typeof address !== 'string' || !address.trim() || address.length > 200 || !Number.isFinite(Number(latitude)) || Math.abs(Number(latitude)) > 90 || !Number.isFinite(Number(longitude)) || Math.abs(Number(longitude)) > 180 || (capacity !== undefined && (!Number.isInteger(Number(capacity)) || Number(capacity) < 1 || Number(capacity) > 10000))) return fail(res, 400, 'VALIDATION_ERROR', 'Name, code, address, latitude and longitude are required.');
-    if (vendorId && (!isId(vendorId) || !(await User.exists({ _id: vendorId, role: 'OPERATOR' })))) return fail(res, 400, 'VALIDATION_ERROR', 'Choose a valid vendor account for this machine.');
-    const machine = await Machine.create({ name, code, description, address, location: { type: 'Point', coordinates: [Number(longitude), Number(latitude)] }, capacity, vendor: vendorId || undefined });
+    if (req.user.role === 'ADMIN' && vendorId && (!isId(vendorId) || !(await User.exists({ _id: vendorId, role: 'OPERATOR', banned: { $ne: true } })))) return fail(res, 400, 'VALIDATION_ERROR', 'Choose an active operator account for this machine.');
+    const vendor = req.user.role === 'OPERATOR' ? req.user._id : vendorId || undefined;
+    const machine = await Machine.create({ name, code, description, address, location: { type: 'Point', coordinates: [Number(longitude), Number(latitude)] }, capacity, vendor });
+    await recordAdminAudit(req, {
+      action: 'Created machine',
+      targetType: 'Machine',
+      targetId: machine._id,
+      targetLabel: `${machine.name} (${machine.code})`,
+      changes: {
+        name: machine.name,
+        code: machine.code,
+        description: machine.description,
+        address: machine.address,
+        coordinates: machine.location.coordinates,
+        capacity: machine.capacity,
+        vendor: String(machine.vendor || ''),
+      },
+    });
     return success(res, machine, 201);
   } catch (error) { return next(error); }
 };
@@ -71,12 +124,13 @@ exports.createMachine = async (req, res, next) => {
 exports.updateMachine = async (req, res, next) => {
   try {
     if (!isId(req.params.id)) return fail(res, 400, 'INVALID_ID', 'Machine id is invalid.');
+    if (req.user.role === 'OPERATOR' && !(await Machine.exists({ _id: req.params.id, vendor: req.user._id }))) return fail(res, 403, 'FORBIDDEN', 'You can only update machines assigned to your operator account.');
     if (req.body.status !== undefined && !['ONLINE', 'OFFLINE', 'MAINTENANCE'].includes(req.body.status)) return fail(res, 400, 'VALIDATION_ERROR', 'Machine status is invalid.');
     const allowed = ['name', 'description', 'address', 'status', 'capacity'];
     const update = Object.fromEntries(Object.entries(req.body).filter(([key]) => allowed.includes(key)));
     if (req.body.vendorId !== undefined) {
       if (req.user.role !== 'ADMIN') return fail(res, 403, 'FORBIDDEN', 'Only an administrator can reassign a machine to a vendor.');
-      if (req.body.vendorId && (!isId(req.body.vendorId) || !(await User.exists({ _id: req.body.vendorId, role: 'OPERATOR' })))) return fail(res, 400, 'VALIDATION_ERROR', 'Choose a valid vendor account for this machine.');
+      if (req.body.vendorId && (!isId(req.body.vendorId) || !(await User.exists({ _id: req.body.vendorId, role: 'OPERATOR', banned: { $ne: true } })))) return fail(res, 400, 'VALIDATION_ERROR', 'Choose an active operator account for this machine.');
       update.vendor = req.body.vendorId || null;
     }
     if (update.capacity !== undefined && (!Number.isInteger(Number(update.capacity)) || Number(update.capacity) < 1 || Number(update.capacity) > 10000)) return fail(res, 400, 'VALIDATION_ERROR', 'Capacity must be a whole number between 1 and 10000.');
@@ -91,7 +145,23 @@ exports.updateMachine = async (req, res, next) => {
       if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 || !Number.isFinite(longitude) || Math.abs(longitude) > 180) return fail(res, 400, 'VALIDATION_ERROR', 'Latitude must be between -90 and 90 and longitude between -180 and 180.');
       update.location = { type: 'Point', coordinates: [longitude, latitude] };
     }
+    const previous = req.user.role === 'ADMIN' ? await Machine.findById(req.params.id) : null;
     const machine = await Machine.findByIdAndUpdate(req.params.id, update, { new: true, runValidators: true });
+    if (machine && previous) {
+      const changes = {};
+      for (const [field, value] of Object.entries(update)) {
+        const before = field === 'location' ? previous.location?.coordinates : previous[field];
+        const after = field === 'location' ? value.coordinates : machine[field];
+        if (JSON.stringify(before) !== JSON.stringify(after)) changes[field] = { before: before ?? null, after: after ?? null };
+      }
+      if (Object.keys(changes).length) await recordAdminAudit(req, {
+        action: 'Updated machine',
+        targetType: 'Machine',
+        targetId: machine._id,
+        targetLabel: `${machine.name} (${machine.code})`,
+        changes,
+      });
+    }
     return machine ? success(res, machine) : fail(res, 404, 'NOT_FOUND', 'Machine not found.');
   } catch (error) { return next(error); }
 };
@@ -104,9 +174,20 @@ exports.deleteMachine = async (req, res, next) => {
     const machine = await Machine.findById(req.params.id);
     if (!machine) return fail(res, 404, 'NOT_FOUND', 'Machine not found.');
     // Removing a vendor clears its shelf and alerts; past orders stay for history.
-    await Inventory.deleteMany({ machine: machine._id });
-    await Alert.deleteMany({ machine: machine._id });
+    const removedInventory = await Inventory.deleteMany({ machine: machine._id });
+    const removedAlerts = await Alert.deleteMany({ machine: machine._id });
     await Machine.deleteOne({ _id: machine._id });
+    await recordAdminAudit(req, {
+      action: 'Deleted machine',
+      targetType: 'Machine',
+      targetId: machine._id,
+      targetLabel: `${machine.name} (${machine.code})`,
+      changes: {
+        deleted: { before: false, after: true },
+        inventoryRowsRemoved: removedInventory.deletedCount,
+        alertsRemoved: removedAlerts.deletedCount,
+      },
+    });
     return success(res, { id: machine.id, deleted: true });
   } catch (error) { return next(error); }
 };
@@ -121,8 +202,17 @@ exports.listProducts = async (req, res, next) => {
     if (machineId) {
       if (!isId(machineId)) return fail(res, 400, 'INVALID_ID', 'Machine id is invalid.');
       const stocks = await Inventory.find({ machine: machineId, product: { $in: products.map(product => product._id) } }).lean();
-      const stockByProduct = new Map(stocks.map(stock => [String(stock.product), Math.max(0, stock.quantity - stock.reserved)]));
-      products = products.map(product => ({ ...product.toObject(), available: stockByProduct.get(String(product._id)) || 0 }));
+      const stockByProduct = new Map(stocks.map(stock => [String(stock.product), stock]));
+      products = products.map(product => {
+        const stock = stockByProduct.get(String(product._id));
+        return {
+          ...product.toObject(),
+          available: stock ? availableQuantity(stock) : 0,
+          expirationDate: stock ? dateOnly(stock.expirationDate) : null,
+          expired: stock ? isExpired(stock.expirationDate) : false,
+          ...(stock ? discountedPrice(product, stock) : {}),
+        };
+      });
     }
     return success(res, products);
   } catch (error) { return next(error); }
@@ -137,11 +227,15 @@ exports.recommendProducts = async (req, res, next) => {
     if (req.query.machineId) {
       if (!isId(req.query.machineId)) return fail(res, 400, 'INVALID_ID', 'Machine id is invalid.');
       const stocks = await Inventory.find({ machine: req.query.machineId, product: { $in: products.map(product => product._id) } }).lean();
-      stockByProduct = new Map(stocks.map(stock => [String(stock.product), Math.max(0, stock.quantity - stock.reserved)]));
+      stockByProduct = new Map(stocks.map(stock => [String(stock.product), stock]));
     }
     const recommendations = products.map(product => {
-      const available = stockByProduct.has(String(product._id)) ? stockByProduct.get(String(product._id)) : undefined;
-      return { product: product.toObject(), available, score: rankProduct(product, intent, available) };
+      const stock = stockByProduct.get(String(product._id));
+      const available = req.query.machineId ? (stock ? availableQuantity(stock) : 0) : undefined;
+      const pricedProduct = req.query.machineId && stock
+        ? { ...product.toObject(), expirationDate: dateOnly(stock.expirationDate), expired: isExpired(stock.expirationDate), ...discountedPrice(product, stock) }
+        : product.toObject();
+      return { product: pricedProduct, available, score: rankProduct(pricedProduct, intent, available) };
     }).filter(row => row.score >= 0 && row.available !== 0).sort((a, b) => b.score - a.score || a.product.name.localeCompare(b.product.name)).slice(0, 12);
     if (intent.words.length && !intent.categories.length && !intent.tags.length && recommendations.every(row => row.score === 0)) return success(res, { intent, recommendations: [] });
     return success(res, { intent, recommendations });
@@ -153,6 +247,21 @@ exports.createProduct = async (req, res, next) => {
     const { name, sku, category, description = '', price, image = '', tags = [] } = req.body;
     if (typeof name !== 'string' || name.trim().length < 2 || name.length > 120 || typeof sku !== 'string' || !/^[a-z0-9_-]{2,40}$/i.test(sku) || typeof category !== 'string' || category.trim().length < 2 || category.length > 80 || !Number.isFinite(Number(price)) || Number(price) < 0 || Number(price) > 100000 || typeof description !== 'string' || description.length > 500 || typeof image !== 'string' || image.length > 2048 || !Array.isArray(tags) || tags.length > 20 || tags.some(tag => typeof tag !== 'string' || tag.length > 32)) return fail(res, 400, 'VALIDATION_ERROR', 'Name, SKU, category and a non-negative price are required.');
     const product = await Product.create({ name, sku, category, description, price: Number(price), image, tags: Array.isArray(tags) ? tags : [] });
+    await recordAdminAudit(req, {
+      action: 'Created product',
+      targetType: 'Product',
+      targetId: product._id,
+      targetLabel: `${product.name} (${product.sku})`,
+      changes: {
+        name: product.name,
+        sku: product.sku,
+        category: product.category,
+        description: product.description,
+        price: product.price,
+        image: product.image,
+        tags: product.tags,
+      },
+    });
     return success(res, product, 201);
   } catch (error) { return next(error); }
 };
@@ -173,7 +282,22 @@ exports.updateProduct = async (req, res, next) => {
       const hasStock = await Inventory.exists({ product: req.params.id, quantity: { $gt: 0 } });
       if (hasStock) return fail(res, 409, 'PRODUCT_HAS_STOCK', 'Remove all on-hand inventory before archiving this product.');
     }
+    const previous = req.user.role === 'ADMIN' ? await Product.findById(req.params.id) : null;
     const product = await Product.findByIdAndUpdate(req.params.id, update, { new: true, runValidators: true });
+    if (product && previous) {
+      const changes = {};
+      for (const [field, after] of Object.entries(update)) {
+        const before = previous[field];
+        if (JSON.stringify(before) !== JSON.stringify(after)) changes[field] = { before: before ?? null, after };
+      }
+      if (Object.keys(changes).length) await recordAdminAudit(req, {
+        action: 'Updated product',
+        targetType: 'Product',
+        targetId: product._id,
+        targetLabel: `${product.name} (${product.sku})`,
+        changes,
+      });
+    }
     return product ? success(res, product) : fail(res, 404, 'NOT_FOUND', 'Product not found.');
   } catch (error) { return next(error); }
 };
@@ -183,7 +307,15 @@ exports.deleteProduct = async (req, res, next) => {
     if (!isId(req.params.id)) return fail(res, 400, 'INVALID_ID', 'Product id is invalid.');
     const hasStock = await Inventory.exists({ product: req.params.id, quantity: { $gt: 0 } });
     if (hasStock) return fail(res, 409, 'PRODUCT_HAS_STOCK', 'Remove all on-hand inventory before archiving this product.');
+    const previous = req.user.role === 'ADMIN' ? await Product.findById(req.params.id) : null;
     const product = await Product.findByIdAndUpdate(req.params.id, { active: false }, { new: true });
+    if (product && previous?.active) await recordAdminAudit(req, {
+      action: 'Archived product',
+      targetType: 'Product',
+      targetId: product._id,
+      targetLabel: `${product.name} (${product.sku})`,
+      changes: { active: { before: true, after: false } },
+    });
     return product ? success(res, product) : fail(res, 404, 'NOT_FOUND', 'Product not found.');
   } catch (error) { return next(error); }
 };
@@ -236,7 +368,7 @@ exports.listInventory = async (req, res, next) => {
 
 exports.updateInventory = async (req, res, next) => {
   try {
-    const { machineId, productId, quantity, lowStockThreshold, slot } = req.body;
+    const { machineId, productId, quantity, lowStockThreshold, slot, expirationDate, discountPercent } = req.body;
     if (!isId(machineId) || !isId(productId) || !Number.isInteger(Number(quantity)) || Number(quantity) < 0) return fail(res, 400, 'VALIDATION_ERROR', 'Valid machineId, productId and non-negative integer quantity are required.');
     if (!(await Machine.exists({ _id: machineId })) || !(await Product.exists({ _id: productId, active: true }))) return fail(res, 404, 'NOT_FOUND', 'Machine or active product not found.');
     if (req.user.role === 'OPERATOR' && !(await Machine.exists({ _id: machineId, vendor: req.user._id }))) return fail(res, 403, 'FORBIDDEN', 'This machine is not assigned to your vendor account.');
@@ -247,10 +379,34 @@ exports.updateInventory = async (req, res, next) => {
     if (current && (String(current.machine) !== String(machineId) || String(current.product) !== String(productId))) return fail(res, 409, 'INVENTORY_KEY_IMMUTABLE', 'Machine and product cannot be changed on an existing inventory row.');
     if (current && Number(quantity) < current.reserved) return fail(res, 409, 'STOCK_RESERVED', 'Quantity cannot be lower than stock already reserved by customers.');
     if (lowStockThreshold !== undefined && (!Number.isInteger(Number(lowStockThreshold)) || Number(lowStockThreshold) < 0)) return fail(res, 400, 'VALIDATION_ERROR', 'lowStockThreshold must be a non-negative integer.');
-    const row = await Inventory.findOneAndUpdate({ machine: machineId, product: productId, ...(current ? { reserved: { $lte: Number(quantity) } } : {}) }, { $set: { quantity: Number(quantity), ...(lowStockThreshold !== undefined ? { lowStockThreshold: Number(lowStockThreshold) } : {}), ...(slot !== undefined ? { slot: String(slot).slice(0, 20) } : {}) }, $setOnInsert: { reserved: 0 } }, { new: true, upsert: true, runValidators: true });
+    const parsedExpiration = expirationDate === undefined ? current?.expirationDate ?? null : parseExpirationDate(expirationDate);
+    if (expirationDate !== undefined && parsedExpiration === undefined) return fail(res, 400, 'VALIDATION_ERROR', 'expirationDate must be a valid YYYY-MM-DD date or blank.');
+    if (!current && Number(quantity) > 0 && !parsedExpiration) return fail(res, 400, 'EXPIRATION_REQUIRED', 'Set an expiration date before adding new stock.');
+    if (current && Number(quantity) > current.quantity && !parsedExpiration) return fail(res, 400, 'EXPIRATION_REQUIRED', 'Set an expiration date before adding more stock to this shelf.');
+    if (current && Number(quantity) > current.quantity && expirationDate === undefined) return fail(res, 400, 'EXPIRATION_REQUIRED', 'Confirm the expiration date when adding stock to an existing shelf.');
+    if (current?.expirationDate && expirationDate !== undefined && !parsedExpiration && Number(quantity) > 0) return fail(res, 400, 'EXPIRATION_REQUIRED', 'Stock with an expiration date cannot be changed to undated stock.');
+    if (Number(quantity) > (current?.quantity || 0) && parsedExpiration && isExpired(parsedExpiration)) return fail(res, 400, 'PRODUCT_EXPIRED', 'Expired stock cannot be added to inventory.');
+    if (current?.quantity > 0 && current.expirationDate && Number(quantity) > current.quantity && parsedExpiration?.getTime() !== current.expirationDate.getTime()) return fail(res, 409, 'EXPIRATION_BATCH_MISMATCH', 'This shelf tracks one expiration date for all units. Remove or sell the current stock before adding a different-expiry batch.');
+    const nextDiscount = discountPercent === undefined ? Number(current?.discountPercent || 0) : Number(discountPercent);
+    if (!Number.isInteger(nextDiscount) || nextDiscount < 0 || nextDiscount > 90) return fail(res, 400, 'VALIDATION_ERROR', 'discountPercent must be a whole number between 0 and 90.');
+    if (discountPercent !== undefined && nextDiscount > 0 && !isNearExpiry(parsedExpiration)) return fail(res, 400, 'DISCOUNT_WINDOW_CLOSED', 'Discounts can only be set when a product expires within the next 7 days.');
+    const row = await Inventory.findOneAndUpdate({ machine: machineId, product: productId, ...(current ? { reserved: { $lte: Number(quantity) } } : {}) }, { $set: { quantity: Number(quantity), discountPercent: nextDiscount, expirationDate: parsedExpiration, ...(lowStockThreshold !== undefined ? { lowStockThreshold: Number(lowStockThreshold) } : {}), ...(slot !== undefined ? { slot: String(slot).slice(0, 20) } : {}) }, $setOnInsert: { reserved: 0 } }, { new: true, upsert: true, runValidators: true });
     if (!row) return fail(res, 409, 'STOCK_RESERVED', 'Quantity cannot be lower than stock already reserved by customers.');
     await row.populate('machine product');
     await syncOperationalAlerts();
+    if (req.user.role === 'ADMIN') await recordAdminAudit(req, {
+      action: current ? 'Updated inventory' : 'Added inventory',
+      targetType: 'Inventory',
+      targetId: row._id,
+      targetLabel: `${row.product.name} at ${row.machine.name}`,
+      changes: {
+        quantity: { before: current?.quantity ?? 0, after: row.quantity },
+        lowStockThreshold: { before: current?.lowStockThreshold ?? 5, after: row.lowStockThreshold },
+        slot: { before: current?.slot || '', after: row.slot || '' },
+        expirationDate: { before: current?.expirationDate || null, after: row.expirationDate || null },
+        discountPercent: { before: current?.discountPercent || 0, after: row.discountPercent || 0 },
+      },
+    });
     return success(res, row, current ? 200 : 201);
   } catch (error) { return next(error); }
 };
@@ -261,8 +417,21 @@ exports.deleteInventory = async (req, res, next) => {
     const row = await Inventory.findById(req.params.id);
     if (!row || row.reserved > 0) return fail(res, 404, 'NOT_FOUND', 'Inventory row was not found or has active reservations.');
     if (req.user.role === 'OPERATOR' && !(await Machine.exists({ _id: row.machine, vendor: req.user._id }))) return fail(res, 403, 'FORBIDDEN', 'This machine is not assigned to your vendor account.');
+    if (req.user.role === 'ADMIN') await row.populate('machine product');
     await row.deleteOne();
     await syncOperationalAlerts();
+    await recordAdminAudit(req, {
+      action: 'Removed inventory',
+      targetType: 'Inventory',
+      targetId: row._id,
+      targetLabel: `${row.product?.name || 'Product'} at ${row.machine?.name || 'machine'}`,
+      changes: {
+        deleted: { before: false, after: true },
+        quantity: row.quantity,
+        expirationDate: row.expirationDate || null,
+        discountPercent: row.discountPercent || 0,
+      },
+    });
     return success(res, { id: row.id, deleted: true });
   } catch (error) { return next(error); }
 };
@@ -287,14 +456,18 @@ exports.createReservation = async (req, res, next) => {
     const byId = new Map(products.map(product => [String(product._id), product]));
     const lines = [];
     for (const [productId, quantity] of normalized) {
-      const stock = await Inventory.findOneAndUpdate({ machine: machineId, product: productId, $expr: { $gte: [{ $subtract: ['$quantity', '$reserved'] }, quantity] } }, { $inc: { reserved: quantity } }, { new: true });
+      const now = new Date();
+      const stock = await Inventory.findOneAndUpdate({ machine: machineId, product: productId, $expr: { $gte: [{ $subtract: ['$quantity', '$reserved'] }, quantity] }, $or: [{ expirationDate: { $exists: false } }, { expirationDate: null }, { expirationDate: { $gte: now } }] }, { $inc: { reserved: quantity } }, { new: true });
       if (!stock) {
         for (const hold of holds) await Inventory.updateOne({ _id: hold.id }, { $inc: { reserved: -hold.quantity } });
+        const existingStock = await Inventory.findOne({ machine: machineId, product: productId }).lean();
+        if (existingStock && isExpired(existingStock.expirationDate, now)) return fail(res, 409, 'PRODUCT_EXPIRED', `${byId.get(productId).name} has expired and cannot be reserved.`);
         return fail(res, 409, 'INSUFFICIENT_STOCK', `${byId.get(productId).name} is no longer available in the requested quantity.`);
       }
       holds.push({ id: stock._id, quantity });
       const product = byId.get(productId);
-      lines.push({ product: product._id, name: product.name, sku: product.sku, quantity, unitPrice: product.price });
+      const pricing = discountedPrice(product, stock);
+      lines.push({ product: product._id, name: product.name, sku: product.sku, quantity, unitPrice: pricing.price, ...(pricing.discountPercent ? { discountPercent: pricing.discountPercent } : {}), expirationDate: dateOnly(stock.expirationDate) });
     }
     const total = Math.round(lines.reduce((sum, line) => sum + line.unitPrice * line.quantity, 0) * 100) / 100;
     const requestedMethod = ['CARD', 'UPI', 'CASHLESS'].includes(paymentMethod) ? paymentMethod : 'DEMO';
@@ -319,6 +492,11 @@ exports.payReservation = async (req, res, next) => {
     const upiId = String(req.body.upiId || '').trim();
     if (method === 'CARD' && !/^\d{4}$/.test(last4)) return fail(res, 400, 'VALIDATION_ERROR', 'The card number is incomplete.');
     if (method === 'UPI' && !/^[a-z0-9._-]{2,64}@[a-z]{2,32}$/i.test(upiId)) return fail(res, 400, 'VALIDATION_ERROR', 'Enter a valid UPI ID, for example name@bank.');
+    const pending = await Reservation.findOne({ _id: req.params.id, customer: req.user._id, status: 'PENDING' });
+    if (pending && await findExpiredReservationItem(pending)) {
+      await expireReservationForProduct(pending);
+      return fail(res, 409, 'PRODUCT_EXPIRED', 'A product in this order has expired. The reservation was cancelled and its stock hold released.');
+    }
     const otp = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
     const reference = paymentReferenceCode();
     const now = new Date();
@@ -390,11 +568,15 @@ exports.dispenseReservation = async (req, res, next) => {
     }
     const otp = String(req.body.otp || '');
     if (!/^\d{6}$/.test(otp) || !verifyPickupCode(otp, row.otpHash)) return fail(res, 401, 'INVALID_OTP', 'The pickup code is incorrect.');
+    if (await findExpiredReservationItem(row)) {
+      await expireReservationForProduct(row);
+      return fail(res, 409, 'PRODUCT_EXPIRED', 'A product in this order has expired. The reservation was cancelled and the simulated payment was refunded.');
+    }
     const claimed = await Reservation.findOneAndUpdate({ _id: row._id, status: 'PAID', otpHash: row.otpHash, otpExpiresAt: { $gt: new Date() } }, { $set: { status: 'DISPENSED', dispensedAt: new Date() }, $unset: { otpHash: 1, pickupOtp: 1 } }, { new: true }).select('+pickupOtp');
     if (!claimed) return fail(res, 409, 'ALREADY_DISPENSED', 'This reservation has already been dispensed or changed.');
     const deducted = [];
     for (const item of row.items) {
-      const result = await Inventory.updateOne({ machine: row.machine, product: item.product, quantity: { $gte: item.quantity }, reserved: { $gte: item.quantity } }, { $inc: { quantity: -item.quantity, reserved: -item.quantity } });
+      const result = await Inventory.updateOne({ machine: row.machine, product: item.product, quantity: { $gte: item.quantity }, reserved: { $gte: item.quantity }, $or: [{ expirationDate: { $exists: false } }, { expirationDate: null }, { expirationDate: { $gte: new Date() } }] }, { $inc: { quantity: -item.quantity, reserved: -item.quantity } });
       if (!result.modifiedCount) {
         for (const previous of deducted) await Inventory.updateOne({ machine: row.machine, product: previous.product }, { $inc: { quantity: previous.quantity, reserved: previous.quantity } });
         await Reservation.updateOne({ _id: row._id, status: 'DISPENSED' }, { $set: { status: 'PAID', dispensedAt: null, otpHash: row.otpHash, pickupOtp: encryptPickupCode(otp) } });
@@ -447,6 +629,13 @@ exports.resolveComplaint = async (req, res, next) => {
     const response = req.body.response === undefined ? undefined : String(req.body.response).trim();
     if (response !== undefined && response.length > 1000) return fail(res, 400, 'VALIDATION_ERROR', 'Keep your reply under 1000 characters.');
     const complaint = await Complaint.findOneAndUpdate({ _id: req.params.id, status: 'OPEN' }, { $set: { status: 'RESOLVED', resolvedAt: new Date(), resolvedBy: req.user._id, ...(response ? { response } : {}) } }, { new: true }).populate('customer', 'name email').populate('reservation', 'code status total');
+    if (complaint) await recordAdminAudit(req, {
+      action: 'Resolved support complaint',
+      targetType: 'Complaint',
+      targetId: complaint._id,
+      targetLabel: `${complaint.reference} · ${complaint.subject}`,
+      changes: { status: { before: 'OPEN', after: 'RESOLVED' }, replied: Boolean(response) },
+    });
     return complaint ? success(res, complaint) : fail(res, 404, 'NOT_FOUND', 'An open complaint with that id was not found.');
   } catch (error) { return next(error); }
 };
@@ -462,7 +651,7 @@ exports.overview = async (req, res, next) => {
     const machineFilter = scoped ? { vendor: req.user._id } : {};
     const stockFilter = scoped ? { machine: { $in: machineIds } } : {};
     const orderFilter = scoped ? { machine: { $in: machineIds } } : {};
-    const [machines, online, inventory, alerts, sales, revenue, recentOrders, demand] = await Promise.all([
+    const [machines, online, inventory, alerts, sales, revenue, recentOrders, demand, salesTrend, topProducts] = await Promise.all([
       Machine.countDocuments(machineFilter),
       Machine.countDocuments({ ...machineFilter, status: 'ONLINE' }),
       Inventory.find(stockFilter).populate('machine', 'name code status').populate('product', 'name sku price category'),
@@ -471,14 +660,16 @@ exports.overview = async (req, res, next) => {
       Reservation.aggregate([{ $match: { status: 'DISPENSED', createdAt: { $gte: since }, ...orderFilter } }, { $group: { _id: null, total: { $sum: '$total' } } }]),
       Reservation.find(orderFilter).populate('machine', 'name code').sort({ createdAt: -1 }).limit(6).select('code total status createdAt machine'),
       Reservation.aggregate([{ $match: { status: 'DISPENSED', createdAt: { $gte: since }, ...orderFilter } }, { $unwind: '$items' }, { $group: { _id: { product: '$items.product', machine: '$machine', name: '$items.name' }, units: { $sum: '$items.quantity' }, orders: { $sum: 1 } } }]),
+      Reservation.aggregate([{ $match: { status: 'DISPENSED', createdAt: { $gte: since }, ...orderFilter } }, { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } }, sales: { $sum: 1 }, revenue: { $sum: '$total' } } }, { $sort: { _id: 1 } }]),
+      Reservation.aggregate([{ $match: { status: 'DISPENSED', createdAt: { $gte: since }, ...orderFilter } }, { $unwind: '$items' }, { $group: { _id: '$items.name', units: { $sum: '$items.quantity' }, revenue: { $sum: { $multiply: ['$items.quantity', '$items.unitPrice'] } } } }, { $sort: { units: -1, revenue: -1, _id: 1 } }, { $limit: 5 }]),
     ]);
     let machineAttendance = await exports.listMachineAttendanceWithVendor(req);
     const recommendations = inventory.map(row => {
       const sold = demand.filter(entry => String(entry._id.product) === String(row.product?._id) && String(entry._id.machine) === String(row.machine?._id)).reduce((sum, entry) => sum + entry.units, 0);
-      const available = Math.max(0, row.quantity - row.reserved);
+      const available = row.available;
       return { inventoryId: row._id, machine: row.machine, product: row.product, threshold: row.lowStockThreshold, unitsSold30d: sold, ...projectStock({ available, reserved: row.reserved, lowStockThreshold: row.lowStockThreshold, unitsSold: sold, days: 30 }) };
     }).filter(row => row.available <= row.threshold || (row.daysRemaining !== null && row.daysRemaining <= 3)).sort((a, b) => (a.daysRemaining ?? 999) - (b.daysRemaining ?? 999));
-    return success(res, { machines: { total: machines, online }, inventory: { rows: inventory.length, lowStock: inventory.filter(row => row.quantity - row.reserved <= row.lowStockThreshold).length }, alerts, sales30d: sales, revenue30d: Math.round((revenue[0]?.total || 0) * 100) / 100, recentOrders, recommendations, machineAttendance });
+    return success(res, { machines: { total: machines, online }, inventory: { rows: inventory.length, lowStock: inventory.filter(row => row.available <= row.lowStockThreshold).length }, alerts, sales30d: sales, revenue30d: Math.round((revenue[0]?.total || 0) * 100) / 100, recentOrders, salesTrend: salesTrend.map(row => ({ date: row._id, sales: row.sales, revenue: Math.round(row.revenue * 100) / 100 })), topProducts: topProducts.map(row => ({ name: row._id, units: row.units, revenue: Math.round(row.revenue * 100) / 100 })), recommendations, machineAttendance });
   } catch (error) { return next(error); }
 };
 
@@ -486,6 +677,13 @@ exports.resolveAlert = async (req, res, next) => {
   try {
     if (!isId(req.params.id)) return fail(res, 400, 'INVALID_ID', 'Alert id is invalid.');
     const alert = await Alert.findOneAndUpdate({ _id: req.params.id, resolvedAt: null }, { $set: { resolvedAt: new Date(), suppressed: true } }, { new: true });
+    if (alert) await recordAdminAudit(req, {
+      action: 'Resolved stock alert',
+      targetType: 'Alert',
+      targetId: alert._id,
+      targetLabel: alert.message,
+      changes: { resolved: { before: false, after: true } },
+    });
     return alert ? success(res, alert) : fail(res, 404, 'NOT_FOUND', 'Open alert not found.');
   } catch (error) { return next(error); }
 };
@@ -539,7 +737,7 @@ exports.forecast = async (req, res, next) => {
     const byKey = new Map(sold.map(row => [`${row._id.machine}:${row._id.product}`, row.units]));
     return success(res, rows.map(row => {
       const units = byKey.get(`${row.machine._id}:${row.product._id}`) || 0;
-      const available = Math.max(0, row.quantity - row.reserved);
+      const available = row.available;
       return { inventoryId: row._id, machine: row.machine, product: row.product, periodDays: days, unitsSold: units, ...projectStock({ available, reserved: row.reserved, lowStockThreshold: row.lowStockThreshold, unitsSold: units, days }) };
     }).sort((a, b) => (a.daysRemaining ?? 9999) - (b.daysRemaining ?? 9999)));
   } catch (error) { return next(error); }

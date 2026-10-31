@@ -10,7 +10,7 @@ const generateToken = (id) => {
 };
 
 // @desc    Register a new user
-// @route   POST /api/auth/register
+// @route   POST /api/session/register
 // @access  Public
 exports.register = async (req, res, next) => {
   try {
@@ -44,6 +44,7 @@ exports.register = async (req, res, next) => {
           name: user.name,
           email: user.email,
           role: user.role,
+          operatorRequestStatus: user.operatorRequestStatus,
           token: generateToken(user._id)
         }
       });
@@ -54,7 +55,7 @@ exports.register = async (req, res, next) => {
 };
 
 // @desc    Auth user & get token
-// @route   POST /api/auth/login
+// @route   POST /api/session/login
 // @access  Public
 exports.login = async (req, res, next) => {
   try {
@@ -73,6 +74,7 @@ exports.login = async (req, res, next) => {
           name: user.name,
           email: user.email,
           role: user.role,
+          operatorRequestStatus: user.operatorRequestStatus,
           token: generateToken(user._id)
         }
       });
@@ -85,7 +87,7 @@ exports.login = async (req, res, next) => {
 };
 
 // @desc    Get user profile
-// @route   GET /api/auth/me
+// @route   GET /api/session/me
 // @access  Private
 exports.getMe = async (req, res, next) => {
   try {
@@ -96,8 +98,25 @@ exports.getMe = async (req, res, next) => {
   }
 };
 
+exports.requestOperatorAccess = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Account not found.' } });
+    if (user.role !== 'CUSTOMER') return res.status(409).json({ success: false, error: { code: 'ROLE_NOT_ELIGIBLE', message: 'Only customer accounts can request operator access.' } });
+    if (user.operatorRequestStatus === 'PENDING') return res.status(409).json({ success: false, error: { code: 'REQUEST_PENDING', message: 'Your operator access request is already awaiting review.' } });
+    user.operatorRequestStatus = 'PENDING';
+    user.operatorRequestedAt = new Date();
+    user.operatorReviewedAt = undefined;
+    user.operatorReviewedBy = undefined;
+    await user.save();
+    return res.status(201).json({ success: true, data: { operatorRequestStatus: user.operatorRequestStatus, operatorRequestedAt: user.operatorRequestedAt } });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 // @desc    Logout user / clear cookie (if implementing HTTP-only cookies)
-// @route   POST /api/auth/logout
+// @route   POST /api/session/logout
 // @access  Private
 exports.logout = async (req, res, next) => {
   res.json({ success: true, message: 'Logged out successfully' });

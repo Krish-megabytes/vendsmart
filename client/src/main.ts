@@ -2,17 +2,24 @@ import './style.css'
 import * as L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 
-type User = { _id: string; name: string; email: string; role: 'CUSTOMER' | 'OPERATOR' | 'ADMIN'; token: string }
-type Machine = { _id: string; name: string; code: string; address: string; description: string; status: string; capacity?: number; location?: { coordinates: number[] }; availableUnits?: number; topProduct?: { name: string; price: number; available: number } }
+type User = { _id: string; name: string; email: string; role: 'CUSTOMER' | 'OPERATOR' | 'ADMIN'; token: string; operatorRequestStatus?: 'NONE' | 'PENDING' | 'APPROVED' | 'REJECTED' }
+type Account = { _id: string; name: string; email: string; role: User['role']; banned: boolean; bannedAt: string | null; operatorRequestStatus?: 'NONE' | 'PENDING' | 'APPROVED' | 'REJECTED'; operatorRequestedAt?: string | null; createdAt: string }
+type Machine = { _id: string; name: string; code: string; address: string; description: string; status: string; capacity?: number; lastHeartbeat?: string; vendor?: { _id?: string; name: string } | string | null; location?: { coordinates: number[] }; availableUnits?: number; topProduct?: { name: string; price: number; originalPrice?: number; discountPercent?: number; expirationDate?: string | null; available: number } }
 type ForecastRow = { inventoryId: string; periodDays: number; unitsSold: number; dailyAverage: number; daysRemaining: number | null; suggestedRestock: number; machine: Machine; product: Product }
-type Product = { _id: string; name: string; sku: string; category: string; description: string; price: number; image: string; tags: string[]; available?: number; active?: boolean }
+type Product = { _id: string; name: string; sku: string; category: string; description: string; price: number; originalPrice?: number; discountPercent?: number; expirationDate?: string | null; expired?: boolean; image: string; tags: string[]; available?: number; active?: boolean }
 type Reservation = { _id: string; code: string; status: string; total: number; createdAt: string; otp?: string; pickupOtp?: string; paymentMethod?: string; paymentReference?: string; paymentLast4?: string; machine?: Machine; items?: { product?: string; name: string; quantity: number; unitPrice?: number }[] }
 type Complaint = { _id: string; reference: string; category: string; subject: string; message: string; status: 'OPEN' | 'RESOLVED'; response?: string; createdAt: string; resolvedAt?: string; reservation?: { _id: string; code: string; status: string; total: number } | string; machine?: { name: string; code?: string } | string; customer?: { name: string; email: string } }
+type ProductSuggestion = { _id: string; name: string; category: string; details: string; votes: number; voted: boolean; status: 'OPEN' | 'ADDED'; product?: { _id: string; name: string; sku: string } | null; createdAt: string }
+type AdminAuditEntry = { _id: string; actorName: string; actorEmail: string; action: string; targetType: string; targetId: string; targetLabel: string; changes: Record<string, unknown>; createdAt: string }
 type PaymentDraft = { machineId: string; items: { productId: string; quantity: number; name: string; price: number }[] }
-type View = 'store' | 'orders' | 'operations' | 'payment' | 'support'
-type InventoryRow = { _id: string; quantity: number; reserved: number; lowStockThreshold: number; slot?: string; machine: Machine; product: Product }
+const ADMIN_VIEWS = ['admin-requests', 'admin-users', 'admin-operators', 'admin-machines', 'admin-assignment', 'admin-support', 'admin-audit'] as const
+type AdminView = typeof ADMIN_VIEWS[number]
+const VENDOR_VIEWS = ['vendor-machines', 'vendor-products', 'vendor-inventory', 'vendor-sales', 'vendor-orders', 'vendor-suggestions', 'vendor-alerts', 'vendor-support'] as const
+type VendorView = typeof VENDOR_VIEWS[number]
+type View = 'store' | 'orders' | 'operations' | 'accounts' | 'payment' | 'support' | 'suggestions' | AdminView | VendorView
+type InventoryRow = { _id: string; quantity: number; reserved: number; available?: number; lowStockThreshold: number; slot?: string; expirationDate?: string | null; discountPercent?: number; machine: Machine; product: Product }
 type Alert = { _id: string; type: string; severity: string; message: string; machine?: Machine; product?: Product; createdAt: string }
-type Overview = { machines: { total: number; online: number }; inventory: { rows: number; lowStock: number }; alerts: Alert[]; sales30d: number; revenue30d: number; recentOrders: Reservation[]; recommendations: { inventoryId: string; machine: Machine; product: Product; available: number; threshold: number; dailyAverage: number; daysRemaining: number | null; suggestedRestock: number }[] }
+type Overview = { machines: { total: number; online: number }; inventory: { rows: number; lowStock: number }; alerts: Alert[]; sales30d: number; revenue30d: number; recentOrders: Reservation[]; salesTrend: { date: string; sales: number; revenue: number }[]; topProducts: { name: string; units: number; revenue: number }[]; machineAttendance: { _id: string; name: string; code: string; address?: string; status: string; capacity: number; vendor: { name: string } | null; onlineOrdersToday: number; revenueToday: number; utilization: number }[]; recommendations: { inventoryId: string; machine: Machine; product: Product; available: number; threshold: number; dailyAverage: number; daysRemaining: number | null; suggestedRestock: number }[] }
 type ApiResponse<T> = { success: boolean; data: T; error?: { message: string; code: string } }
 type Recommendation = { product: Product; available?: number; score: number }
 type RecommendationResponse = { intent: { categories: string[]; tags: string[]; maxPrice?: number; words: string[] }; recommendations: Recommendation[] }
@@ -25,7 +32,20 @@ const COMPLAINT_CATEGORIES: { value: string; label: string }[] = [
   { value: 'MACHINE', label: 'The machine did not work' },
   { value: 'OTHER', label: 'Something else' },
 ]
-const viewFromHash = (): View => location.hash.includes('operations') ? 'operations' : location.hash.includes('payment') ? 'payment' : location.hash.includes('support') ? 'support' : location.hash.includes('orders') ? 'orders' : 'store'
+const SUGGESTION_OPTIONS: { category: string; items: string[] }[] = [
+  { category: 'Chips & snacks', items: ['Lay’s Classic Salted', 'Lay’s India’s Magic Masala', 'Lay’s Spanish Tomato Tango', 'Lay’s American Style Cream & Onion', 'Lay’s Chile Limon', 'Lay’s Maxx Macho Chilli', 'Kurkure Masala Munch', 'Kurkure Naughty Tomato', 'Bingo! Mad Angles Achaari Masti', 'Doritos Nacho Cheese', 'Pringles Original', 'Salted peanuts'] },
+  { category: 'Cold drinks', items: ['Coca-Cola', 'Pepsi', 'Sprite', 'Thums Up', 'Fanta Orange', 'Mountain Dew', 'Limca', '7UP', 'Appy Fizz', 'Cold coffee', 'Iced tea', 'Bottled water'] },
+  { category: 'Sweets & biscuits', items: ['Cadbury Dairy Milk', 'KitKat', 'Snickers', 'Oreo cookies', 'Hide & Seek biscuits', 'Good Day biscuits', 'Energy bar'] },
+]
+const viewFromHash = (): View => {
+  const hash = location.hash.slice(1)
+  if (hash === 'admin-suggestions') return 'store'
+  const adminView = ADMIN_VIEWS.find(view => view === hash)
+  if (adminView) return adminView
+  const vendorView = VENDOR_VIEWS.find(view => view === hash)
+  if (vendorView) return vendorView
+  return hash.includes('accounts') ? 'accounts' : hash.includes('operations') ? 'operations' : hash.includes('payment') ? 'payment' : hash.includes('support') ? 'support' : hash.includes('suggestions') ? 'suggestions' : hash.includes('orders') ? 'orders' : 'store'
+}
 type CurrencyCode = 'INR' | 'USD' | 'EUR' | 'GBP' | 'AED' | 'SGD' | 'AUD'
 // Catalog and order totals are stored in USD. These indicative rates convert them
 // for display only, so switching currency never rewrites stored prices.
@@ -62,6 +82,8 @@ const icon = (name: string, size = 18) => {
     settings: '<circle cx="12" cy="12" r="3"/><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.7-.6a8 8 0 0 1-1.8 1l-.3 1.8h-2.8l-.3-1.8a8 8 0 0 1-1.8-1l-1.7.6-1.4-2.4 1.4-1.1a7.3 7.3 0 0 1 0-2l-1.4-1.1 1.4-2.4 1.7.6a8 8 0 0 1 1.8-1l.3-1.8h2.8l.3 1.8a8 8 0 0 1 1.8 1l1.7-.6 1.4 2.4-1.4 1.1a7.3 7.3 0 0 1 0 2Z"/>',
     logout: '<path d="M10 17l5-5-5-5M15 12H3"/><path d="M12 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6"/>',
     coffee: '<path d="M10 2v2m4-2v2m-9 4h14l-1 10a3 3 0 0 1-3 3h-6a3 3 0 0 1-3-3L5 8Zm14 2h2a2 2 0 0 1 0 4h-2"/>',
+    menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+    chevron: '<path d="m6 9 6 6 6-6"/>',
     heart: '<path d="M20.8 5.6a5 5 0 0 0-7.1 0L12 7.3l-1.7-1.7a5 5 0 0 0-7.1 7.1L12 21l8.8-8.3a5 5 0 0 0 0-7.1Z"/>',
     repeat: '<path d="m17 1 4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="m7 23-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
     card: '<rect x="2" y="5" width="20" height="14" rx="2.5"/><path d="M2 10h20M6 15h4"/>',
@@ -107,12 +129,17 @@ const describeRouteStep = (step: { distance?: number; name?: string; maneuver?: 
 
 class VendSmartApp {
   private user: User | null = this.restoreUser()
+  private adminUsers: Account[] = []
+  private adminUsersLoaded = false
+  private adminAuditLog: AdminAuditEntry[] = []
+  private adminSearch = ''
   private machines: Machine[] = []
   private products: Product[] = []
   private catalogProducts: Product[] = []
   private reservations: Reservation[] = []
   private inventory: InventoryRow[] = []
   private overview: Overview | null = null
+  private salesRange: 7 | 30 = 7
   private forecast: ForecastRow[] = []
   private selectedMachine = ''
   private category = 'All items'
@@ -120,6 +147,7 @@ class VendSmartApp {
   private cart = new Map<string, number>()
   private view: View = viewFromHash()
   private complaints: Complaint[] = []
+  private suggestions: ProductSuggestion[] = []
   private paymentDraft: PaymentDraft | null = null
   private paymentReservation: Reservation | null = null
   private paymentMethod: 'CARD' | 'UPI' = 'CARD'
@@ -151,6 +179,7 @@ class VendSmartApp {
   private routeController: AbortController | null = null
   private lastRouteOrigin: [number, number] | null = null
   private lastRouteRequestedAt = 0
+  private expirationTimer: number | null = null
 
   constructor() {
     this.render()
@@ -205,25 +234,39 @@ class VendSmartApp {
     })
     const result = await response.json().catch(() => ({ success: false, error: { message: 'The API returned an invalid response.' } })) as ApiResponse<T>
     if (!response.ok || !result.success) {
-      if (response.status === 401 && this.user) this.setUser(null, false)
+      if (this.user && (response.status === 401 || (response.status === 403 && result.error?.code === 'ACCOUNT_BANNED'))) this.setUser(null, false)
       throw new Error(result.error?.message || 'Unable to complete your request.')
     }
     return result.data
   }
 
   private async load() {
-    const tasks: Promise<unknown>[] = [
-      this.request<Machine[]>('/machines').then(rows => { this.machines = rows; if (!this.selectedMachine && rows.length) this.selectedMachine = rows.find(row => row.status === 'ONLINE')?._id || rows[0]._id }),
-      this.request<Reservation[]>('/reservations').then(rows => { this.reservations = rows }),
-      ...(this.user ? [this.request<Product[]>('/favorites').then(rows => { this.favorites = new Set(rows.map(row => row._id)) }), this.request<Complaint[]>('/complaints').then(rows => { this.complaints = rows })] : []),
+    const tasks: { label: string; promise: Promise<unknown> }[] = [
+      { label: 'machines', promise: this.request<Machine[]>('/machines').then(rows => { this.machines = rows; if (!this.selectedMachine && rows.length) this.selectedMachine = rows.find(row => row.status === 'ONLINE')?._id || rows[0]._id }) },
+      { label: 'orders', promise: this.request<Reservation[]>('/reservations').then(rows => { this.reservations = rows }) },
+      { label: 'product suggestions', promise: this.request<ProductSuggestion[]>(`/suggestions${this.user && ['ADMIN', 'OPERATOR'].includes(this.user.role) ? '?status=OPEN' : ''}`).then(rows => { this.suggestions = rows }) },
+      ...(this.user ? [
+        { label: 'favorites', promise: this.request<Product[]>('/favorites').then(rows => { this.favorites = new Set(rows.map(row => row._id)) }) },
+        { label: 'support requests', promise: this.request<Complaint[]>('/complaints').then(rows => { this.complaints = rows }) },
+      ] : []),
     ]
     if (this.user && ['ADMIN', 'OPERATOR'].includes(this.user.role)) tasks.push(
-      this.request<InventoryRow[]>('/inventory').then(rows => { this.inventory = rows }),
-      this.request<Product[]>('/products').then(rows => { this.catalogProducts = rows }),
-      this.request<ForecastRow[]>('/forecast?days=30').then(rows => { this.forecast = rows }),
-      this.request<Overview>('/overview').then(data => { this.overview = data }),
+      { label: 'inventory', promise: this.request<InventoryRow[]>('/inventory').then(rows => { this.inventory = rows }) },
+      { label: 'catalog', promise: this.request<Product[]>('/products').then(rows => { this.catalogProducts = rows }) },
+      { label: 'forecast', promise: this.request<ForecastRow[]>('/forecast?days=30').then(rows => { this.forecast = rows }) },
+      { label: 'operations overview', promise: this.request<Overview>('/overview').then(data => { this.overview = data }) },
     )
-    await Promise.allSettled(tasks)
+    if (this.user?.role === 'ADMIN') tasks.push(
+      { label: 'customer and operator accounts', promise: this.request<Account[]>('/users').then(rows => { this.adminUsers = rows; this.adminUsersLoaded = true }) },
+    )
+    if (this.user?.role === 'ADMIN' && this.view === 'admin-audit') tasks.push(
+      { label: 'admin audit log', promise: this.request<AdminAuditEntry[]>('/users/audit-log').then(rows => { this.adminAuditLog = rows }) },
+    )
+    const results = await Promise.allSettled(tasks.map(task => task.promise))
+    const failures = results.flatMap((result, index) => result.status === 'rejected'
+      ? [`${tasks[index].label}: ${result.reason instanceof Error ? result.reason.message : 'request failed'}`]
+      : [])
+    if (failures.length) this.toast(`Some data could not be loaded. ${failures.join('; ')}`, 'error')
     await this.loadProducts()
     this.setRouteTarget(this.activeOrder())
     if (!this.pickupMachine && this.pickupWatchId !== null) this.stopRouteWatch()
@@ -248,13 +291,33 @@ class VendSmartApp {
       if (this.selectedMachine) params.set('machineId', this.selectedMachine)
       if (this.search.trim()) params.set('search', this.search.trim())
       this.products = await this.request<Product[]>(`/products?${params.toString()}`)
+      this.scheduleExpirationRefresh()
     } catch (error) { this.toast((error as Error).message, 'error') }
+  }
+
+  private scheduleExpirationRefresh() {
+    if (this.expirationTimer !== null) window.clearTimeout(this.expirationTimer)
+    const expirations = this.products
+      .filter(product => product.expirationDate && !product.expired)
+      .map(product => new Date(`${product.expirationDate}T23:59:59.999Z`).getTime())
+      .filter(timestamp => timestamp > Date.now())
+    if (!expirations.length) { this.expirationTimer = null; return }
+    this.expirationTimer = window.setTimeout(async () => {
+      await this.loadProducts()
+      let removedExpiredItem = false
+      for (const product of this.products) {
+        if (product.expired && this.cart.delete(product._id)) removedExpiredItem = true
+      }
+      this.render()
+      if (removedExpiredItem) this.toast('An expired item was removed from your bag.', 'info')
+    }, Math.min(2147483647, Math.min(...expirations) - Date.now() + 10))
   }
 
   private setUser(user: User | null, reload = true) {
     this.user = user
-    if (user) sessionStorage.setItem(STORAGE_KEY, JSON.stringify(user)); else { sessionStorage.removeItem(STORAGE_KEY); this.favorites.clear(); this.arrived = false }
-    this.view = 'store'
+    if (user) sessionStorage.setItem(STORAGE_KEY, JSON.stringify(user)); else { sessionStorage.removeItem(STORAGE_KEY); this.favorites.clear(); this.suggestions = this.suggestions.map(suggestion => ({ ...suggestion, voted: false })); this.arrived = false }
+    this.view = user && ['ADMIN', 'OPERATOR'].includes(user.role) ? 'operations' : 'store'
+    if (location.hash.slice(1) !== this.view) location.hash = this.view
     if (reload) void this.load()
     else this.render()
   }
@@ -263,14 +326,20 @@ class VendSmartApp {
     this.machineMap?.remove()
     this.machineMap = null
     this.machineMarkers.clear()
+    if (VENDOR_VIEWS.includes(this.view as VendorView) && this.user?.role !== 'OPERATOR') {
+      this.view = this.user?.role === 'ADMIN' ? 'operations' : 'store'
+      if (location.hash.slice(1) !== this.view) location.hash = this.view
+    }
     const app = document.querySelector<HTMLDivElement>('#app')!
     const staff = Boolean(this.user && ['ADMIN', 'OPERATOR'].includes(this.user.role))
     const openComplaints = this.complaints.filter(complaint => complaint.status === 'OPEN').length
-    const content = this.view === 'operations' && staff ? this.renderOperationsPanel() : this.view === 'orders' ? this.renderOrders() : this.view === 'payment' ? this.renderPayment() : this.view === 'support' ? this.renderSupport() : this.renderStore()
+    const adminView = this.user?.role === 'ADMIN' && (this.view === 'operations' || this.view === 'accounts' || ADMIN_VIEWS.some(view => view === this.view))
+    const operatorPage = this.user?.role === 'OPERATOR' && VENDOR_VIEWS.includes(this.view as VendorView)
+    const content = adminView ? this.renderAdminDashboard() : operatorPage ? this.renderVendorPage(this.view as VendorView) : this.view === 'operations' ? this.renderOperationsPanel() : this.view === 'accounts' ? this.renderAccountsPanel() : this.view === 'orders' ? this.renderOrders() : this.view === 'payment' ? this.renderPayment() : this.view === 'support' ? this.renderSupport() : this.view === 'suggestions' ? this.renderSuggestionBoard() : this.renderStore()
     app.innerHTML = `
 
 
-      <div class="app-shell">
+      <div class="app-shell ${adminView ? 'admin-shell' : ''} ${staff ? 'staff-shell' : ''} ${this.user?.role === 'OPERATOR' ? 'operator-shell' : ''}">
         <aside class="sidebar">
           <a class="brand" href="#store" aria-label="VendSmart home"><span class="brand-mark">${icon('coffee', 23)}</span><span class="brand-name">vend<span>smart</span><small>SMART VENDING, BETTER DAYS</small></span></a>
           <div class="workspace-label">WORKSPACE</div>
@@ -278,13 +347,68 @@ class VendSmartApp {
             <button class="nav-link ${this.view === 'store' ? 'active' : ''}" data-view="store">${icon('grid')}<span>Discover</span></button>
             <button class="nav-link ${this.view === 'orders' ? 'active' : ''}" data-view="orders">${icon('cart')}<span>My orders</span><span class="nav-count">${this.reservations.length || ''}</span></button>
             <button class="nav-link ${this.view === 'support' ? 'active' : ''}" data-view="support">${icon('help')}<span>Help & support</span>${staff && openComplaints ? `<span class="nav-alert">${openComplaints}</span>` : ''}</button>
-            ${staff ? `<div class="nav-separator"></div><div class="workspace-label ops-label">OPERATIONS</div><button class="nav-link ${this.view === 'operations' ? 'active' : ''}" data-view="operations">${icon('chart')}<span>Overview</span></button><button class="nav-link" data-jump="inventory">${icon('box')}<span>Inventory</span>${this.overview?.inventory.lowStock ? `<span class="nav-alert">${this.overview.inventory.lowStock}</span>` : ''}</button><button class="nav-link" data-jump="alerts">${icon('bell')}<span>Alerts</span>${this.overview?.alerts.length ? `<span class="nav-alert">${this.overview.alerts.length}</span>` : ''}</button>` : ''}
+            ${!staff ? `<button class="nav-link ${this.view === 'suggestions' ? 'active' : ''}" data-view="suggestions">${icon('spark')}<span>Suggestions</span></button>` : ''}
+            ${staff ? `<div class="nav-separator"></div><div class="workspace-label ops-label">OPERATIONS</div><button class="nav-link ${this.view === 'operations' ? 'active' : ''}" data-view="operations">${icon('chart')}<span>Overview</span></button><button class="nav-link ${this.view === 'vendor-inventory' ? 'active' : ''}" data-view="vendor-inventory">${icon('box')}<span>Inventory</span>${this.overview?.inventory.lowStock ? `<span class="nav-alert">${this.overview.inventory.lowStock}</span>` : ''}</button><button class="nav-link ${this.view === 'vendor-alerts' ? 'active' : ''}" data-view="vendor-alerts">${icon('bell')}<span>Alerts</span>${this.overview?.alerts.length ? `<span class="nav-alert">${this.overview.alerts.length}</span>` : ''}</button>` : ''}
           </nav>
           <div class="sidebar-bottom"><div class="help-card"><div class="help-symbol">${icon('spark', 18)}</div><div><strong>Good choices, made easy.</strong><span>Find a little something for your next break.</span></div><a href="#store" aria-label="Explore items">${icon('arrow', 15)}</a></div><button class="sidebar-user" data-action="account">${this.user ? `<span class="avatar">${initials(this.user.name)}</span><span class="account-copy"><strong>${escapeHtml(this.user.name)}</strong><small>${escapeHtml(this.user.role.toLowerCase())} account</small></span><span class="user-action">${icon('logout', 17)}</span>` : `<span class="avatar guest-avatar">G</span><span class="account-copy"><strong>Guest session</strong><small>Sign in to place an order</small></span><span class="user-action">${icon('arrow', 16)}</span>`}</button></div>
         </aside>
-        <main class="main-area"><header class="topbar"><div class="breadcrumb"><span>VendSmart</span><span class="crumb-divider">/</span><strong>${this.view === 'store' ? 'Discover' : this.view === 'orders' ? 'My orders' : this.view === 'payment' ? 'Payment' : this.view === 'support' ? 'Help & support' : 'Overview'}</strong></div><div class="top-actions"><label class="currency-picker" title="Display currency"><select data-currency aria-label="Display currency">${CURRENCIES.map(row => `<option value="${row.code}" ${row.code === this.currency ? 'selected' : ''}>${row.code}</option>`).join('')}</select></label><span class="service-indicator"><i></i> All systems normal</span><button class="icon-button" data-action="orders" aria-label="View orders">${icon('bell')}<span class="notification-dot"></span></button><button class="top-avatar" data-action="account">${this.user ? initials(this.user.name) : 'G'}</button></div></header><div class="page-content">${content}</div><footer class="footer"><span>VendSmart <span class="footer-dot">·</span> Better breaks, one tap away.</span><span>Freshly stocked for your day <span class="footer-spark">✳</span></span></footer></main>
+        <main class="main-area"><header class="topbar"><div class="breadcrumb"><span>VendSmart</span><span class="crumb-divider">/</span><strong>${this.view === 'store' ? 'Discover' : this.view === 'orders' ? 'My orders' : this.view === 'accounts' ? 'Users' : this.view === 'payment' ? 'Payment' : this.view === 'support' ? 'Help & support' : this.view === 'suggestions' ? 'Suggestions' : this.view === 'admin-requests' ? 'Operator requests' : this.view === 'admin-users' ? 'Users' : this.view === 'admin-operators' ? 'Operators' : this.view === 'admin-machines' ? 'Machines & assignment' : this.view === 'admin-support' ? 'Support / issues' : this.view === 'admin-audit' ? 'Audit log' : 'Overview'}</strong></div><div class="top-actions"><label class="currency-picker" title="Display currency"><select data-currency aria-label="Display currency">${CURRENCIES.map(row => `<option value="${row.code}" ${row.code === this.currency ? 'selected' : ''}>${row.code}</option>`).join('')}</select></label><span class="service-indicator"><i></i> All systems normal</span><button class="icon-button" data-action="orders" aria-label="View orders">${icon('bell')}<span class="notification-dot"></span></button><button class="top-avatar" data-action="account">${this.user ? initials(this.user.name) : 'G'}</button></div></header><div class="page-content">${content}</div><footer class="footer"><span>VendSmart <span class="footer-dot">·</span> Better breaks, one tap away.</span><span>Freshly stocked for your day <span class="footer-spark">✳</span></span></footer></main>
       </div>
       <div id="modal-root"></div><div id="toast-root" aria-live="polite"></div>`
+    if (operatorPage) {
+      const vendorLabels: Record<VendorView, string> = {
+        'vendor-machines': 'My machines',
+        'vendor-products': 'Products',
+        'vendor-inventory': 'Inventory',
+        'vendor-sales': 'Sales & analytics',
+        'vendor-orders': 'Orders',
+        'vendor-suggestions': 'Product suggestions',
+        'vendor-alerts': 'Alerts',
+        'vendor-support': 'Support requests',
+      }
+      const breadcrumb = app.querySelector<HTMLElement>('.breadcrumb strong')
+      if (breadcrumb) breadcrumb.textContent = vendorLabels[this.view as VendorView]
+    }
+    if (this.view === 'store') {
+      app.querySelectorAll<HTMLButtonElement>('[data-add]').forEach(button => {
+        const product = this.products.find(item => item._id === button.dataset.add)
+        const info = button.closest('.product-info')
+        if (!product || !info) return
+        const price = info.querySelector<HTMLElement>('.product-price')
+        if (price) price.innerHTML = this.priceMarkup(product)
+        info.querySelector('.product-stock')?.insertAdjacentHTML('beforeend', this.expirationLabel(product))
+      })
+      app.querySelectorAll<HTMLElement>('[data-recommend]').forEach(button => {
+        const product = this.products.find(item => item._id === button.dataset.recommend)
+        const details = button.querySelector('small')
+        const score = this.recommendations.find(item => item.product._id === product?._id)?.score || 0
+        if (product && details) details.innerHTML = `${this.priceMarkup(product)} · ${this.expirationLabel(product)} · ${Math.round(score * 10) / 10} match`
+      })
+    }
+    this.enhanceInventoryDashboard(app)
+    if (this.user?.role === 'ADMIN') {
+      const nav = app.querySelector<HTMLElement>('.primary-nav')
+      if (nav) nav.innerHTML = `<button class="nav-link ${this.view === 'operations' ? 'active' : ''}" data-view="operations">${icon('chart')}<span>Dashboard</span></button><button class="nav-link ${this.view === 'admin-requests' ? 'active' : ''}" data-view="admin-requests">${icon('settings')}<span>Operator requests</span>${this.adminUsers.filter(account => account.operatorRequestStatus === 'PENDING' && !account.banned).length ? `<span class="nav-alert">${this.adminUsers.filter(account => account.operatorRequestStatus === 'PENDING' && !account.banned).length}</span>` : ''}</button><button class="nav-link ${this.view === 'admin-users' || this.view === 'accounts' ? 'active' : ''}" data-view="admin-users">${icon('grid')}<span>Users</span></button><button class="nav-link ${this.view === 'admin-operators' ? 'active' : ''}" data-view="admin-operators">${icon('settings')}<span>Operators</span></button><button class="nav-link ${this.view === 'admin-machines' ? 'active' : ''}" data-view="admin-machines">${icon('pin')}<span>Machines</span></button><button class="nav-link ${this.view === 'admin-assignment' ? 'active' : ''}" data-view="admin-assignment">${icon('repeat')}<span>Machine assignment</span></button><button class="nav-link ${this.view === 'admin-support' ? 'active' : ''}" data-view="admin-support">${icon('help')}<span>Support / issues</span></button><button class="nav-link ${this.view === 'admin-audit' ? 'active' : ''}" data-view="admin-audit">${icon('clock')}<span>Audit log</span></button>`
+    }
+    if (this.user?.role === 'OPERATOR') {
+      const nav = app.querySelector<HTMLElement>('.primary-nav')
+      if (nav) nav.innerHTML = `<button class="nav-link ${this.view === 'operations' ? 'active' : ''}" data-view="operations">${icon('chart')}<span>Dashboard</span></button><button class="nav-link ${this.view === 'vendor-machines' ? 'active' : ''}" data-view="vendor-machines">${icon('pin')}<span>My machines</span></button><button class="nav-link ${this.view === 'vendor-products' ? 'active' : ''}" data-view="vendor-products">${icon('box')}<span>Products</span></button><button class="nav-link ${this.view === 'vendor-inventory' ? 'active' : ''}" data-view="vendor-inventory">${icon('box')}<span>Inventory</span>${this.overview?.inventory.lowStock ? `<span class="nav-alert">${this.overview.inventory.lowStock}</span>` : ''}</button><button class="nav-link ${this.view === 'vendor-suggestions' ? 'active' : ''}" data-view="vendor-suggestions">${icon('spark')}<span>Product suggestions</span></button><button class="nav-link ${this.view === 'vendor-sales' ? 'active' : ''}" data-view="vendor-sales">${icon('chart')}<span>Sales & analytics</span></button><button class="nav-link ${this.view === 'vendor-orders' ? 'active' : ''}" data-view="vendor-orders">${icon('cart')}<span>Orders</span></button><button class="nav-link ${this.view === 'vendor-alerts' ? 'active' : ''}" data-view="vendor-alerts">${icon('bell')}<span>Alerts</span>${this.overview?.alerts.length ? `<span class="nav-alert">${this.overview.alerts.length}</span>` : ''}</button><button class="nav-link ${this.view === 'vendor-support' ? 'active' : ''}" data-view="vendor-support">${icon('help')}<span>Support requests</span></button>`
+    }
+    if (staff) {
+      const shell = app.querySelector<HTMLElement>('.app-shell')
+      if (shell) {
+        const nav = shell.querySelector<HTMLElement>('.primary-nav')
+        if (nav) nav.id = 'staff-mobile-nav'
+        shell.insertAdjacentHTML('afterbegin', `<button class="staff-menu-toggle" type="button" aria-controls="staff-mobile-nav" aria-expanded="false" aria-label="Open navigation menu">${icon('menu', 20)}</button><button class="staff-nav-backdrop" type="button" aria-label="Close navigation menu" aria-hidden="true" tabindex="-1"></button>`)
+      }
+    }
+    if (staff && (this.view === 'operations' || (this.user?.role === 'OPERATOR' && VENDOR_VIEWS.includes(this.view as VendorView)))) {
+      app.querySelectorAll<HTMLElement>('.machine-status-row').forEach(row => {
+        const action = row.querySelector<HTMLElement>('[data-edit-machine], [data-machine-status]')
+        const machineId = action?.dataset.editMachine || action?.dataset.machineStatus
+        if (machineId) action?.insertAdjacentHTML('beforebegin', `<button class="status-toggle" data-machine-details="${escapeHtml(machineId)}">Details & stock</button>`)
+      })
+    }
     this.bindEvents()
     if (this.view === 'store') this.mountMachineMap()
     if (this.view === 'orders') this.mountRouteMap()
@@ -310,7 +434,124 @@ class VendSmartApp {
     const { machine, meters } = pick
     const top = machine.topProduct!
     const distance = meters === null ? '' : ` (${formatDistance(meters)})`
-    return `<section class="recommend-panel"><div class="recommend-head"><span class="recommend-pin">${icon('pin', 17)}</span><strong>${escapeHtml(machine.name)}${distance}</strong><span class="live-badge"><i></i>LIVE</span></div><article class="recommend-card"><div class="recommend-card-top"><h3>${escapeHtml(top.name)}</h3><strong class="recommend-price">${this.money(top.price)}</strong></div><div class="recommend-stock"><span class="availability-pill ${top.available <= 4 ? 'low' : ''}">${icon('check', 12)} ${top.available <= 4 ? 'Low stock' : 'Available'}</span><span>${top.available} units in stock</span></div><button class="recommend-cta" data-recommend-machine="${machine._id}">${machine._id === this.selectedMachine ? 'Current Machine' : 'Recommended Machine'}</button></article><div class="connected-strip">${icon('wifi', 15)} Connected to Machine #${escapeHtml(machine.code)}</div></section>`
+    return `<section class="recommend-panel"><div class="recommend-head"><span class="recommend-pin">${icon('pin', 17)}</span><strong>${escapeHtml(machine.name)}${distance}</strong><span class="live-badge"><i></i>LIVE</span></div><article class="recommend-card"><div class="recommend-card-top"><h3>${escapeHtml(top.name)}</h3><strong class="recommend-price">${this.priceMarkup(top)}</strong></div><div class="recommend-stock"><span class="availability-pill ${top.available <= 4 ? 'low' : ''}">${icon('check', 12)} ${top.available <= 4 ? 'Low stock' : 'Available'}</span><span>${top.available} units in stock</span></div>${this.expirationLabel(top)}<button class="recommend-cta" data-recommend-machine="${machine._id}">${machine._id === this.selectedMachine ? 'Current Machine' : 'Recommended Machine'}</button></article><div class="connected-strip">${icon('wifi', 15)} Connected to Machine #${escapeHtml(machine.code)}</div></section>`
+  }
+
+  private priceMarkup(product: Pick<Product, 'price' | 'originalPrice' | 'discountPercent'>) {
+    return product.discountPercent && product.originalPrice !== undefined
+      ? `<span class="discount-price">${this.money(product.price)}</span><del>${this.money(product.originalPrice)}</del><small class="discount-tag">−${product.discountPercent}%</small>`
+      : this.money(product.price)
+  }
+
+  private expirationLabel(product: Pick<Product, 'expirationDate' | 'expired'>) {
+    if (!product.expirationDate) return '<small class="expiry-note">Expiry date not set</small>'
+    const date = new Date(`${product.expirationDate.slice(0, 10)}T00:00:00Z`)
+    const today = new Date()
+    const todayUtc = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())
+    const days = Math.floor((Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) - todayUtc) / 86400000)
+    const expired = product.expired ?? days < 0
+    const label = expired ? 'Expired' : days === 0 ? 'Expires today' : days <= 7 ? `Expires in ${days} day${days === 1 ? '' : 's'}` : `Expires ${date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}`
+    return `<small class="expiry-note ${expired ? 'expired' : days <= 7 ? 'soon' : ''}">${escapeHtml(label)}</small>`
+  }
+
+  private discountIsActive(expirationDate?: string | null, discountPercent?: number) {
+    if (!expirationDate || !discountPercent) return false
+    const expiresAt = new Date(expirationDate).getTime()
+    const expiresDay = new Date(`${expirationDate.slice(0, 10)}T00:00:00Z`)
+    const now = new Date()
+    const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+    const days = Math.floor((Date.UTC(expiresDay.getUTCFullYear(), expiresDay.getUTCMonth(), expiresDay.getUTCDate()) - today) / 86400000)
+    return expiresAt >= Date.now() && days >= 0 && days <= 7
+  }
+
+  private estimatedInventoryExpirations() {
+    const dates = new Map<string, string>()
+    const rowsByMachine = new Map<string, InventoryRow[]>()
+    for (const row of this.inventory) {
+      const machineId = row.machine._id
+      const rows = rowsByMachine.get(machineId) || []
+      rows.push(row)
+      rowsByMachine.set(machineId, rows)
+    }
+
+    for (const rows of rowsByMachine.values()) {
+      const usedDays = new Set<number>()
+      const sortedRows = [...rows].sort((a, b) => {
+        const productOrder = `${a.product.sku} ${a.product.name}`.localeCompare(`${b.product.sku} ${b.product.name}`)
+        return productOrder || a._id.localeCompare(b._id)
+      })
+      for (const row of sortedRows) {
+        if (row.expirationDate) continue
+        const productDescription = `${row.product.category} ${row.product.name}`.toLowerCase()
+        const shelfLife = /fresh|dairy|yogurt|milk|sandwich|salad/.test(productDescription)
+          ? { min: 7, spread: 24 }
+          : /drink|beverage|water|juice|coffee|tea|soda/.test(productDescription)
+            ? { min: 45, spread: 91 }
+            : /chip|snack|biscuit|cookie|chocolate|candy|gum/.test(productDescription)
+              ? { min: 90, spread: 151 }
+              : { min: 30, spread: 121 }
+        let hash = 0
+        for (const character of `${row.machine.code}:${row.product.sku}:${row._id}`) hash = (hash * 31 + character.charCodeAt(0)) >>> 0
+        let days = shelfLife.min + hash % shelfLife.spread
+        while (usedDays.has(days)) days += 1
+        usedDays.add(days)
+        const today = new Date()
+        const expiry = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + days))
+        dates.set(row._id, expiry.toISOString().slice(0, 10))
+      }
+    }
+    return dates
+  }
+
+  private inventoryExpiryLabel(row: InventoryRow, estimates: Map<string, string>) {
+    if (row.expirationDate) {
+      return this.expirationLabel({
+        expirationDate: row.expirationDate.slice(0, 10),
+        expired: new Date(row.expirationDate).getTime() < Date.now(),
+      })
+    }
+    const date = estimates.get(row._id)
+    return date
+      ? `<small class="expiry-note estimated">Demo estimate · ${new Date(`${date}T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })}</small>`
+      : this.expirationLabel({ expirationDate: null })
+  }
+
+  private enhanceInventoryDashboard(root: ParentNode) {
+    const estimates = this.estimatedInventoryExpirations()
+    root.querySelectorAll<HTMLTableElement>('#inventory .dashboard-inventory-table').forEach(table => {
+      const header = table.querySelector('thead tr')
+      if (!header) return
+      const expiryHeader = document.createElement('th')
+      expiryHeader.textContent = 'Expiry / offer'
+      header.insertBefore(expiryHeader, header.children[4] || null)
+      const emptyCell = table.querySelector<HTMLTableCellElement>('.dashboard-empty')
+      if (emptyCell) emptyCell.colSpan = 6
+      table.querySelectorAll<HTMLButtonElement>('[data-edit-inventory]').forEach(button => {
+        const inventory = this.inventory.find(row => row._id === button.dataset.editInventory)
+        const tableRow = button.closest('tr')
+        if (!inventory || !tableRow) return
+        const cell = document.createElement('td')
+        const activeDiscount = this.discountIsActive(inventory.expirationDate, inventory.discountPercent)
+        cell.innerHTML = `${this.inventoryExpiryLabel(inventory, estimates)}${inventory.discountPercent ? `<small class="discount-tag">${inventory.discountPercent}% ${activeDiscount ? 'offer active' : 'discount set'}</small>` : ''}`
+        tableRow.insertBefore(cell, tableRow.children[4] || null)
+      })
+    })
+  }
+
+  private renderOperatorAccessCard() {
+    if (this.user?.role !== 'CUSTOMER') return ''
+    const status = this.user.operatorRequestStatus || 'NONE'
+    if (status === 'PENDING') return `<section class="operator-access-card"><div><strong>Operator access requested</strong><p>Your request is waiting for administrator review.</p></div><span class="operator-access-status">${icon('clock', 15)} Pending</span></section>`
+    if (status === 'APPROVED') return `<section class="operator-access-card"><div><strong>Your operator request was approved</strong><p>Sign out and back in to open your operator dashboard.</p></div></section>`
+    const rejected = status === 'REJECTED'
+    return `<section class="operator-access-card"><div><strong>${rejected ? 'Reapply to become an operator' : 'Want to become a VendSmart operator?'}</strong><p>${rejected ? 'Your previous request was declined. You can submit a new request for review.' : 'Request access from an administrator. Once approved, you can add and manage your own vending machines.'}</p></div><button class="button-secondary" data-action="request-operator">${icon('settings', 16)} ${rejected ? 'Request again' : 'Request operator access'}</button></section>`
+  }
+
+  private renderSuggestionBoard(staff = false) {
+    const customer = this.user?.role === 'CUSTOMER'
+    const openSuggestions = this.suggestions.filter(suggestion => suggestion.status === 'OPEN')
+    const suggestions = staff ? openSuggestions : this.suggestions
+    return `<section class="suggestion-board ${staff ? 'suggestion-board-staff' : ''}" id="${staff ? 'admin-suggestions' : 'product-suggestions'}"><div class="suggestion-board-heading"><div><span class="section-kicker">${staff ? 'CUSTOMER DEMAND' : 'YOUR IDEAS, SHARED'}</span><h2>${staff ? 'What customers <em>want next.</em>' : 'What should we <em>stock next?</em>'}</h2><p>${staff ? 'Popular requests from customers. Add a requested item to the catalog or decline it.' : 'Suggest an item or vote for something you would like to see in the machines.'}</p></div>${staff ? `<span class="suggestion-total">${openSuggestions.length} open</span>` : ''}</div>${customer ? `<form class="suggestion-form" id="suggestion-form"><label class="suggestion-item-select">Choose an item to suggest<select name="name" required><option value="" disabled selected>Select a snack or drink</option>${SUGGESTION_OPTIONS.map(group => `<optgroup label="${escapeHtml(group.category)}">${group.items.map(item => `<option value="${escapeHtml(item)}" data-category="${escapeHtml(group.category)}">${escapeHtml(item)}</option>`).join('')}</optgroup>`).join('')}</select></label><label class="suggestion-details">Anything else? <span>(optional)</span><input name="details" maxlength="500" placeholder="Share a size or other detail"></label><button class="button-primary" type="submit">Share suggestion ${icon('arrow', 14)}</button></form>` : !staff && !this.user ? `<div class="suggestion-signin"><span>Sign in to share an idea or vote.</span><button class="button-secondary" data-action="account">Sign in</button></div>` : ''}<div class="suggestion-list">${suggestions.length ? suggestions.map(suggestion => `<article class="suggestion-card"><div class="suggestion-vote-count"><strong>${suggestion.votes}</strong><small>vote${suggestion.votes === 1 ? '' : 's'}</small></div><div class="suggestion-copy"><strong>${escapeHtml(suggestion.name)}</strong><small>${escapeHtml(suggestion.category || 'General')} ${suggestion.details ? `· ${escapeHtml(suggestion.details)}` : ''}</small>${suggestion.status === 'ADDED' ? `<span class="suggestion-added">${icon('check', 12)} Added to catalog${suggestion.product ? ` · ${escapeHtml(suggestion.product.name)}` : ''}</span>` : ''}</div>${staff ? `<div class="suggestion-actions"><button class="button-secondary" data-add-suggestion="${suggestion._id}">Add product</button><button class="text-button danger" data-decline-suggestion="${suggestion._id}">Decline</button></div>` : customer && suggestion.status === 'OPEN' ? `<button class="suggestion-vote ${suggestion.voted ? 'voted' : ''}" data-vote-suggestion="${suggestion._id}" aria-pressed="${suggestion.voted}">${suggestion.voted ? 'Voted' : 'Vote'}</button>` : ''}</article>`).join('') : `<div class="suggestion-empty">${staff ? 'No open customer suggestions right now.' : 'No suggestions yet. Be the first to share an idea.'}</div>`}</div></section>`
   }
 
   private stockBadge(product: Product) {
@@ -342,6 +583,60 @@ class VendSmartApp {
     } catch (error) { this.toast((error as Error).message, 'error') }
   }
 
+  private async openMachineDetails(machineId: string) {
+    if (!this.user || !['ADMIN', 'OPERATOR'].includes(this.user.role)) return
+    try {
+      const [machine, inventory] = await Promise.all([
+        this.request<Machine>(`/machines/${machineId}`),
+        this.request<InventoryRow[]>(`/inventory?machineId=${encodeURIComponent(machineId)}`),
+      ])
+      const root = document.querySelector<HTMLDivElement>('#modal-root')
+      if (!root) return
+      const coordinates = machine.location?.coordinates
+      const vendor = typeof machine.vendor === 'object' && machine.vendor ? machine.vendor.name : 'Unassigned'
+      const vendorId = typeof machine.vendor === 'string' ? machine.vendor : machine.vendor?._id || ''
+      const lastSeen = machine.lastHeartbeat ? new Date(machine.lastHeartbeat).toLocaleString() : 'Not reported'
+      const operatorAssignment = this.user.role === 'ADMIN'
+        ? `<form class="form-stack" data-machine-assignment><label>Assigned operator<select name="vendorId"><option value="">Unassigned</option>${this.adminUsers.filter(account => account.role === 'OPERATOR' && !account.banned).map(account => `<option value="${account._id}" ${account._id === vendorId ? 'selected' : ''}>${escapeHtml(account.name)} · ${escapeHtml(account.email)}</option>`).join('')}</select></label><button class="button-secondary" type="submit">Save operator assignment</button></form>`
+        : ''
+      root.innerHTML = `<div class="modal-backdrop" data-dismiss><section class="modal-card contents-modal" role="dialog" aria-modal="true" aria-labelledby="machine-details-title"><button class="modal-close" data-dismiss aria-label="Close">${icon('close')}</button><div class="eyebrow"><span class="eyebrow-line"></span> MACHINE DETAILS</div><div class="contents-head"><strong id="machine-details-title">${escapeHtml(machine.name)}</strong><span class="status-pill status-${machine.status.toLowerCase()}"><i></i>${escapeHtml(machine.status.toLowerCase())}</span></div><p class="contents-address">${escapeHtml(machine.address)}</p><div class="contents-summary"><span>${icon('box', 15)} ${inventory.length} stocked products · ${inventory.reduce((total, row) => total + (row.available ?? Math.max(0, row.quantity - row.reserved)), 0)} available units</span><span>MACHINE #${escapeHtml(machine.code)}</span></div><div class="machine-detail-grid"><div><small>Operator</small><strong>${escapeHtml(vendor)}</strong></div><div><small>Capacity</small><strong>${machine.capacity ?? '—'}</strong></div><div><small>Last heartbeat</small><strong>${escapeHtml(lastSeen)}</strong></div><div><small>Coordinates</small><strong>${coordinates ? `${coordinates[1]}, ${coordinates[0]}` : 'Not set'}</strong></div>${machine.description ? `<div class="machine-detail-description"><small>Description</small><strong>${escapeHtml(machine.description)}</strong></div>` : ''}</div>${operatorAssignment}<div class="contents-list">${inventory.length ? inventory.map(row => `<div class="contents-row"><span class="contents-art">${imageFor(row.product)}</span><span class="contents-copy"><strong>${escapeHtml(row.product.name)}</strong><small>${escapeHtml(row.product.sku)}${row.slot ? ` · Slot ${escapeHtml(row.slot)}` : ''} · ${this.money(row.product.price)}</small></span><span class="contents-stock"><strong>${row.available ?? Math.max(0, row.quantity - row.reserved)} / ${row.quantity}</strong><small>${row.reserved} reserved · threshold ${row.lowStockThreshold}</small></span><button class="text-button" data-detail-adjust="${row._id}">Adjust</button></div>`).join('') : '<div class="contents-loading">No inventory has been assigned to this machine yet.</div>'}</div><button class="button-secondary manage-stock-button" data-add-machine-stock="${machine._id}">${icon('plus', 14)} Add stock to this machine</button></section></div>`
+      root.querySelectorAll<HTMLElement>('.contents-row').forEach((node, index) => {
+        const row = inventory[index]
+        if (!row) return
+        const price = node.querySelector<HTMLElement>('.contents-copy small')
+        const activeDiscount = this.discountIsActive(row.expirationDate, row.discountPercent)
+        const unitPrice = activeDiscount ? Math.round(row.product.price * (1 - (row.discountPercent || 0) / 100) * 100) / 100 : row.product.price
+        if (price) price.innerHTML = `${escapeHtml(row.product.sku)}${row.slot ? ` · Slot ${escapeHtml(row.slot)}` : ''} · ${this.priceMarkup({ price: unitPrice, originalPrice: activeDiscount ? row.product.price : undefined, discountPercent: activeDiscount ? row.discountPercent : undefined })} · ${this.expirationLabel({ expirationDate: row.expirationDate ? row.expirationDate.slice(0, 10) : null, expired: row.expirationDate ? new Date(row.expirationDate).getTime() < Date.now() : false })}`
+      })
+      root.querySelectorAll<HTMLElement>('[data-dismiss]').forEach(node => node.addEventListener('click', event => { if (event.target === node || node.classList.contains('modal-close')) root.innerHTML = '' }))
+      root.querySelector<HTMLFormElement>('[data-machine-assignment]')?.addEventListener('submit', async event => {
+        event.preventDefault()
+        const form = event.currentTarget as HTMLFormElement
+        const button = form.querySelector<HTMLButtonElement>('button[type="submit"]')
+        const vendorId = new FormData(form).get('vendorId')
+        if (!(typeof vendorId === 'string' || vendorId === null)) return
+        if (button) button.disabled = true
+        try {
+          await this.request<Machine>(`/machines/${machine._id}`, { method: 'PATCH', body: JSON.stringify({ vendorId: vendorId || null }) })
+          root.innerHTML = ''
+          await this.load()
+          this.toast('Machine operator assignment saved.', 'success')
+        } catch (error) {
+          if (button) button.disabled = false
+          this.toast(`Could not assign this machine: ${(error as Error).message}`, 'error')
+        }
+      })
+      root.querySelectorAll<HTMLElement>('[data-detail-adjust]').forEach(node => node.addEventListener('click', () => { const id = node.dataset.detailAdjust; root.innerHTML = ''; if (id) this.openInventoryEditor(id) }))
+      root.querySelector<HTMLElement>('[data-add-machine-stock]')?.addEventListener('click', event => {
+        const id = (event.currentTarget as HTMLElement).dataset.addMachineStock
+        root.innerHTML = ''
+        if (id) this.openInventoryEditor(undefined, id)
+      })
+    } catch (error) {
+      this.toast(`Could not load machine details: ${(error as Error).message}`, 'error')
+    }
+  }
+
   private closeMachineContents() {
     this.contentsMachine = null
     this.contentsItems = null
@@ -361,6 +656,13 @@ class VendSmartApp {
     const distance = meters === null ? '' : ` (${formatDistance(meters)})`
     const live = machine.status === 'ONLINE'
     root.innerHTML = `<div class="modal-backdrop" data-dismiss><section class="modal-card contents-modal" role="dialog" aria-modal="true" aria-labelledby="contents-title"><button class="modal-close" data-dismiss aria-label="Close">${icon('close')}</button><div class="contents-head"><span class="recommend-pin">${icon('pin', 17)}</span><strong id="contents-title">${escapeHtml(machine.name)}${distance}</strong><span class="live-badge ${live ? '' : 'off'}"><i></i>${live ? 'LIVE' : escapeHtml(machine.status)}</span></div><p class="contents-address">${escapeHtml(machine.address)}</p><div class="contents-summary"><span>${icon('box', 15)} ${items ? `${total} units across ${inStock} items` : 'Checking stock…'}</span><span>MACHINE #${escapeHtml(machine.code)}</span></div><div class="contents-list">${items ? items.map(item => `<div class="contents-row ${item.available === 0 ? 'empty' : ''}"><span class="contents-art">${imageFor(item)}</span><span class="contents-copy"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.category)} · ${this.money(item.price)}</small></span><span class="contents-stock">${this.stockBadge(item)}</span></div>`).join('') : '<div class="contents-loading">Loading the shelf on this machine…</div>'}</div><button class="recommend-cta contents-choose" data-use-machine="${machine._id}" ${live ? '' : 'disabled'}>${machine._id === this.selectedMachine ? 'This is your pickup machine' : 'Pick up from this machine'}</button></section></div>`
+    if (items) root.querySelectorAll<HTMLElement>('.contents-row').forEach((node, index) => {
+      const product = items[index]
+      if (!product) return
+      const details = node.querySelector<HTMLElement>('.contents-copy small')
+      if (details) details.innerHTML = `${escapeHtml(product.category)} · ${this.priceMarkup(product)}`
+      node.querySelector('.contents-stock')?.insertAdjacentHTML('beforeend', this.expirationLabel(product))
+    })
     root.querySelectorAll<HTMLElement>('[data-dismiss]').forEach(node => node.addEventListener('click', event => { if (event.target === node || node.classList.contains('modal-close')) this.closeMachineContents() }))
     root.querySelector<HTMLElement>('[data-use-machine]')?.addEventListener('click', () => { const id = machine._id; this.closeMachineContents(); void this.selectMachine(id) })
   }
@@ -373,6 +675,7 @@ class VendSmartApp {
     const subtotal = this.products.reduce((sum, product) => sum + product.price * (this.cart.get(product._id) || 0), 0)
     return `<section class="hero-panel"><div class="hero-copy"><div class="eyebrow"><span class="eyebrow-line"></span> YOUR BREAK, UPGRADED</div><h1>A little good<br>goes a <em>long way.</em></h1><p>Thoughtful snacks, better-for-you sips, and everyday essentials — exactly where you need them.</p><div class="hero-points"><span><i class="point-check">${icon('check', 12)}</i> Freshly stocked</span><span><i class="point-check">${icon('check', 12)}</i> Ready when you are</span></div></div><div class="hero-art" aria-hidden="true"><div class="art-sun"></div><div class="art-line line-one"></div><div class="art-line line-two"></div><div class="art-product art-drink"><span>✳</span></div><div class="art-product art-snack"><span>GOOD<br>ENERGY</span></div><div class="art-product art-bar"><span>take<br>a break</span></div><div class="art-note">A brighter<br>kind of break <i>✳</i></div><div class="floating-tag">made for your<br>in-between</div></div><div class="hero-counter"><span class="counter-dot"></span> THE GOOD STUFF, CLOSE BY <strong>${this.products.length ? `${String(this.products.length).padStart(2, '0')}+` : '—'}</strong></div></section>
     <section class="machine-row"><div><span class="section-kicker">PICKUP LOCATION</span><strong>${machine ? `${icon('pin', 17)} ${escapeHtml(machine.name)}` : `${icon('pin', 17)} Choose a nearby machine`}</strong><small>${escapeHtml(machine?.address || 'Select an available location to see its menu.')}</small></div><label class="machine-select-wrap"><span>CHANGE MACHINE</span><select id="machine-select">${this.machines.map(row => `<option value="${row._id}" ${row._id === this.selectedMachine ? 'selected' : ''} ${row.status !== 'ONLINE' ? 'disabled' : ''}>${escapeHtml(row.name)} · ${row.status === 'ONLINE' ? 'Ready' : row.status.toLowerCase()}</option>`).join('')}</select><i>${icon('pin', 16)}</i></label></section>
+    ${this.renderOperatorAccessCard()}
     ${this.renderRecommendedMachine()}
     <section class="machine-map-section"><div class="machine-map-heading"><div><span class="section-kicker">MACHINE FINDER</span><h2>Find a good thing <em>nearby.</em></h2></div><button class="button-secondary" data-action="locate-machines">${icon('pin', 15)} Find near me</button></div><div class="machine-map-layout"><div id="machine-map" class="machine-map" role="application" aria-label="Map of VendSmart pickup machines"></div><div class="machine-location-list">${this.machines.map(row => { const point = machineLatLng(row); const meters = point && this.userLocation ? distanceMeters([this.userLocation.lat, this.userLocation.lng], point) : null; const distance = meters === null ? '' : `${formatDistance(meters)} · ~${Math.max(1, Math.round(meters / 75))} min`; return `<button class="machine-location ${row._id === this.selectedMachine ? 'selected' : ''}" data-choose-machine="${row._id}"><span class="machine-location-pin">${icon('pin', 16)}</span><span class="machine-location-copy"><strong>${escapeHtml(row.name)}</strong><small>${escapeHtml(row.address)}</small></span>${distance ? `<span class="machine-distance">${distance}</span>` : `<span class="machine-location-status status-${row.status.toLowerCase()}">${escapeHtml(row.status.toLowerCase())}</span>`}</button>` }).join('') || '<div class="map-empty">Machine locations will appear here.</div>'}<p id="machine-location-status" class="map-status">${escapeHtml(this.locationStatus)}</p></div></div><small class="map-attribution-note">Map data © OpenStreetMap contributors · Nearby sorting uses your device only. Starting a live route shares your GPS coordinates with the OpenStreetMap routing service; no VendSmart account data is sent.</small></section>
     <section class="catalog-section"><div class="catalog-heading"><div><div class="eyebrow catalog-eyebrow"><span class="eyebrow-line"></span> PICK SOMETHING GOOD</div><h2>Made for your <em>moment.</em></h2></div><div class="catalog-actions"><label class="search-box">${icon('search', 17)}<input id="product-search" value="${escapeHtml(this.search)}" placeholder="Find your favorite..."><kbd>⌘ K</kbd></label><button class="cart-button" data-action="cart">${icon('cart', 17)}<span>Your bag</span><b>${cartQuantity}</b></button></div></div><form class="smart-filter" id="smart-filter-form"><span class="smart-filter-icon">${icon('spark', 16)}</span><label for="smart-filter-input"><strong>Tell us what sounds good</strong><small>e.g. a vegan snack under ${this.money(4)}</small></label><input id="smart-filter-input" value="${escapeHtml(this.prompt)}" placeholder="I'm in the mood for something..." maxlength="180"><button class="smart-filter-button" type="submit">Find my fit ${icon('arrow', 14)}</button>${this.prompt ? `<button class="smart-filter-clear" type="button" data-action="clear-prompt" aria-label="Clear suggestions">${icon('close', 15)}</button>` : ''}</form>${this.prompt && this.recommendations.length ? `<div class="recommendation-strip"><span>${icon('spark', 15)} PICKED FOR YOU</span>${this.recommendations.map(row => `<button class="recommendation-chip" data-recommend="${row.product._id}">${imageFor(row.product)}<span>${escapeHtml(row.product.name)}<small>${this.money(row.product.price)} · ${Math.round(row.score * 10) / 10} match</small></span></button>`).join('')}</div>` : ''}<div class="category-tabs">${categories.map(category => `<button class="category-tab ${category === this.category ? 'selected' : ''}" data-category="${escapeHtml(category)}">${escapeHtml(category)}<span>${category === 'All items' ? this.products.length : category === 'Favorites' ? this.favorites.size : this.products.filter(product => product.category === category).length}</span></button>`).join('')}</div>
@@ -384,7 +687,204 @@ class VendSmartApp {
     return `${this.renderLiveRoutePanel()}<section class="page-heading"><div><div class="eyebrow"><span class="eyebrow-line"></span> YOUR RECENT PICKUPS</div><h1>Every good thing,<br><em>in one place.</em></h1><p>Track an order, find your pickup code, or pick up right where you left off.</p></div><button class="button-primary" data-view="store">${icon('plus', 17)} Find something good</button></section>${!this.user ? `<div class="empty-state order-empty"><div class="empty-icon">${icon('cart', 23)}</div><h3>Your next good break starts here.</h3><p>Sign in to keep your orders and pickup codes in one place.</p><button class="button-primary" data-action="account">${icon('arrow', 16)} Sign in to continue</button></div>` : this.reservations.length ? `<div class="order-list">${this.reservations.map(order => `<article class="order-card"><div class="order-top"><div><span class="order-reference">ORDER ${escapeHtml(order.code)}</span><h3>${escapeHtml(order.machine?.name || 'VendSmart pickup')}</h3><span class="order-address">${escapeHtml(order.machine?.address || '')}</span></div><span class="status-pill status-${order.status.toLowerCase()}"><i></i>${escapeHtml(order.status.toLowerCase())}</span></div><div class="order-meta"><span>${icon('clock', 15)} ${new Date(order.createdAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span><span>${order.items?.reduce((n, item) => n + item.quantity, 0) || '—'} items</span><strong>${this.money(order.total)}</strong></div>${order.status === 'PENDING' ? `<div class="payment-due"><span class="payment-due-icon">${icon('card', 16)}</span><div><strong>Payment not completed</strong><small>Your picks are held for 15 minutes — pay now to unlock your pickup code.</small></div><button class="button-primary pay-order-button" data-pay="${order._id}">Pay ${this.money(order.total)}</button></div>` : ''}${order.status === 'PAID' ? `<div class="pickup-code"><div><span>YOUR PICKUP CODE</span><strong>${order.pickupOtp ? order.pickupOtp.match(/.{1,3}/g)?.join(' ') : 'Code available in your latest order details'}</strong><small>Enter this 6-digit code at the machine within 15 minutes.</small></div><button data-dispense="${order._id}" data-otp="${escapeHtml(order.pickupOtp || '')}">${icon('check', 16)} Dispense</button></div>` : ''}<div class="order-items">${(order.items || []).map(item => `<span>${escapeHtml(item.name)} <b>× ${item.quantity}</b></span>`).join('')}</div>${['PAID', 'PENDING'].includes(order.status) ? `<button class="order-cancel" data-cancel="${order._id}">Cancel reservation</button>` : `<button class="order-reorder" data-reorder="${order._id}">${icon('repeat', 14)} Reorder these picks</button>`}<button class="order-report" data-report="${order._id}">${icon('help', 13)} Report a problem</button></article>`).join('')}</div>` : `<div class="empty-state order-empty"><div class="empty-icon">${icon('coffee', 23)}</div><h3>Nothing on the pickup shelf yet.</h3><p>Find your machine, fill your bag, and your first order will appear right here.</p><button class="button-primary" data-view="store">Explore the menu ${icon('arrow', 16)}</button></div>`}`
   }
 
+  private renderAccountsPanel() {
+    if (this.user?.role !== 'ADMIN') return `<div class="empty-state"><h3>Administrator access required</h3><p>Only administrators can manage customer and operator accounts.</p><button class="button-primary" data-action="account">Back to account</button></div>`
+    const accounts = this.adminUsers.filter(account => account.role !== 'ADMIN')
+    const customers = accounts.filter(account => account.role === 'CUSTOMER').length
+    const operators = accounts.filter(account => account.role === 'OPERATOR').length
+    const banned = accounts.filter(account => account.banned).length
+    const accountContent = !this.adminUsersLoaded ? '<p class="inline-empty">Loading customer and operator accounts…</p>' : accounts.length ? accounts.map(account => `<div class="account-row ${account.banned ? 'is-banned' : ''}" data-account-row data-search="${escapeHtml(`${account.name} ${account.email} ${account.role}`.toLowerCase())}"><span class="avatar">${initials(account.name)}</span><div class="account-copy"><strong>${escapeHtml(account.name)} · ${account.role === 'OPERATOR' ? 'Operator' : 'Customer'}</strong><span>${escapeHtml(account.email)}</span><small>${account.banned ? `Suspended${account.bannedAt ? ` · ${new Date(account.bannedAt).toLocaleDateString()}` : ''}` : `Joined ${new Date(account.createdAt).toLocaleDateString()}`}</small></div><div class="account-actions">${account.role === 'OPERATOR' ? `<button class="text-button" data-set-role="${account._id}" data-role-target="CUSTOMER">Make customer</button>` : account.operatorRequestStatus === 'PENDING' ? '<span class="admin-badge issue-open">Request pending</span>' : ''}<button class="text-button ${account.banned ? '' : 'danger'}" data-set-ban="${account._id}" data-banned="${account.banned}">${account.banned ? 'Restore access' : 'Ban account'}</button></div></div>`).join('') : '<p class="inline-empty">No customer or operator accounts found.</p>'
+    return `<section class="ops-welcome"><div><div class="eyebrow"><span class="eyebrow-line"></span> ADMIN CONTROL CENTER</div><h1>People & <em>access.</em></h1><p>Manage customer and operator access across VendSmart.</p></div><button class="button-secondary" data-action="refresh">${icon('clock', 16)} Refresh accounts</button></section><section class="metrics-grid"><article class="metric-card"><div class="metric-header"><span>Customer accounts</span><i class="metric-icon mint">${icon('heart', 18)}</i></div><strong>${customers}</strong><span class="metric-caption">Registered customers</span></article><article class="metric-card"><div class="metric-header"><span>Operator accounts</span><i class="metric-icon peach">${icon('settings', 18)}</i></div><strong>${operators}</strong><span class="metric-caption">Machine operators</span></article><article class="metric-card ${banned ? 'metric-warn' : ''}"><div class="metric-header"><span>Suspended accounts</span><i class="metric-icon yellow">${icon('lock', 18)}</i></div><strong>${banned}</strong><span class="metric-caption">Customers and operators</span></article><article class="metric-card"><div class="metric-header"><span>Managed accounts</span><i class="metric-icon lavender">${icon('grid', 18)}</i></div><strong>${accounts.length}</strong><span class="metric-caption">Administrator accounts are protected</span></article></section><section class="panel account-management-panel"><div class="panel-heading"><div><span class="section-kicker">ACCOUNT ACCESS</span><h2>Customers & <em>operators.</em></h2></div><label class="search-box">${icon('search', 16)}<input id="account-search" value="${escapeHtml(this.adminSearch)}" placeholder="Search name or email" aria-label="Search accounts"></label></div><div class="account-list">${accountContent}<p class="inline-empty" id="account-search-empty" hidden>No accounts match your search.</p></div></section>`
+  }
+
+  private renderAdminDashboard() {
+    const customers = this.adminUsers.filter(account => account.role === 'CUSTOMER')
+    const operators = this.adminUsers.filter(account => account.role === 'OPERATOR')
+    const operatorRequests = customers.filter(account => account.operatorRequestStatus === 'PENDING' && !account.banned)
+    const activeOperators = operators.filter(account => !account.banned)
+    const openComplaints = this.complaints.filter(complaint => complaint.status === 'OPEN')
+    const assignedMachineCount = this.machines.filter(machine => machine.vendor).length
+    const formatDate = (value: string) => new Date(value).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+    const assignedMachinesFor = (operatorId: string) => this.machines.filter(machine => (typeof machine.vendor === 'string' ? machine.vendor : machine.vendor?._id) === operatorId).map(machine => machine.code).join(', ') || 'No machines'
+    const accountRows = (accounts: Account[], role: 'CUSTOMER' | 'OPERATOR') => !this.adminUsersLoaded
+      ? '<tr><td colspan="6" class="admin-table-empty">Loading accounts…</td></tr>'
+      : accounts.length
+        ? accounts.map((account, index) => `<tr data-admin-searchable data-admin-role="${role}" data-admin-search="${escapeHtml(`${account.name} ${account.email} ${account.role} ${role === 'OPERATOR' ? assignedMachinesFor(account._id) : ''}`.toLowerCase())}"><td>${index + 1}</td><td><span class="admin-person"><i>${escapeHtml(initials(account.name))}</i><strong>${escapeHtml(account.name)}</strong></span></td><td>${escapeHtml(account.email)}</td>${role === 'OPERATOR' ? `<td>${escapeHtml(assignedMachinesFor(account._id))}</td>` : `<td>${formatDate(account.createdAt)}</td>`}<td><span class="admin-badge ${account.banned ? 'banned' : 'active'}">${account.banned ? 'Banned' : 'Active'}</span></td><td><div class="admin-account-actions">${role === 'OPERATOR' ? `<button class="admin-row-action view" data-set-role="${account._id}" data-role-target="CUSTOMER">Make customer</button>` : account.operatorRequestStatus === 'PENDING' ? `<button class="admin-row-action promote" data-view="admin-requests">Review request</button>` : ''}<button class="admin-row-action ${account.banned ? 'restore' : 'ban'}" data-set-ban="${account._id}" data-banned="${account.banned}">${account.banned ? 'Unban' : 'Ban'}</button></div></td></tr>`).join('')
+        : `<tr><td colspan="6" class="admin-table-empty">No ${role === 'CUSTOMER' ? 'customers' : 'operators'} yet.</td></tr>`
+    const machineRows = this.machines.length
+      ? this.machines.map((machine, index) => {
+        const vendorName = typeof machine.vendor === 'object' && machine.vendor ? machine.vendor.name : 'Unassigned'
+        return `<tr data-admin-searchable data-admin-search="${escapeHtml(`${machine.code} ${machine.name} ${machine.address} ${vendorName}`.toLowerCase())}"><td>${index + 1}</td><td><strong>${escapeHtml(machine.code)}</strong></td><td>${escapeHtml(machine.name)}</td><td><span class="admin-badge machine-${machine.status.toLowerCase()}">${escapeHtml(machine.status === 'ONLINE' ? 'Online' : machine.status === 'OFFLINE' ? 'Offline' : 'Maintenance')}</span></td><td><button class="admin-row-action view" data-machine-details="${machine._id}">Details</button></td></tr>`
+      }).join('')
+      : '<tr><td colspan="5" class="admin-table-empty">No machines found.</td></tr>'
+    const assignmentRows = this.machines.length
+      ? this.machines.map(machine => {
+        const vendorId = typeof machine.vendor === 'string' ? machine.vendor : machine.vendor?._id || ''
+        return `<tr><td><strong>${escapeHtml(machine.code)}</strong><small>${escapeHtml(machine.name)} · ${escapeHtml(machine.address)}</small></td><td><label class="admin-assignment-select"><span class="sr-only">Operator for ${escapeHtml(machine.code)}</span><select data-admin-machine-assignment="${machine._id}"><option value="">Unassigned</option>${operators.map(operator => `<option value="${operator._id}" ${operator._id === vendorId ? 'selected' : ''} ${operator.banned ? 'disabled' : ''}>${escapeHtml(operator.name)}${operator.banned ? ' · suspended' : ''}</option>`).join('')}</select></label></td><td><span class="admin-badge machine-${machine.status.toLowerCase()}">${escapeHtml(machine.status === 'ONLINE' ? 'Online' : machine.status === 'OFFLINE' ? 'Offline' : 'Maintenance')}</span></td></tr>`
+      }).join('')
+      : '<tr><td colspan="3" class="admin-table-empty">No machines found.</td></tr>'
+    const complaintRows = openComplaints.length
+      ? openComplaints.slice(0, 6).map((complaint, index) => `<tr data-admin-searchable data-admin-search="${escapeHtml(`${complaint.reference} ${complaint.category} ${complaint.subject} ${complaint.customer?.name || ''} ${complaint.message}`.toLowerCase())}"><td>${index + 1}</td><td><span class="admin-badge issue-type">${escapeHtml(complaint.category)}</span></td><td>${escapeHtml(complaint.customer?.name || 'Customer')}</td><td><strong>${escapeHtml(complaint.subject)}</strong><small>${escapeHtml(complaint.reference)}</small></td><td><span class="admin-badge issue-open">Open</span></td><td><button class="admin-row-action view" data-resolve-complaint="${complaint._id}">Review</button></td></tr>`).join('')
+      : '<tr><td colspan="6" class="admin-table-empty">No open support issues. You are all caught up.</td></tr>'
+    const operatorRequestRows = operatorRequests.length
+      ? operatorRequests.map((account, index) => `<tr data-admin-searchable data-admin-search="${escapeHtml(`${account.name} ${account.email} operator request`.toLowerCase())}"><td>${index + 1}</td><td><span class="admin-person"><i>${escapeHtml(initials(account.name))}</i><strong>${escapeHtml(account.name)}</strong></span></td><td>${escapeHtml(account.email)}</td><td>${account.operatorRequestedAt ? formatDate(account.operatorRequestedAt) : '—'}</td><td><button class="admin-row-action promote" data-review-operator-request="${account._id}" data-approved="true">Approve</button></td><td><button class="admin-row-action ban" data-review-operator-request="${account._id}" data-approved="false">Decline</button></td></tr>`).join('')
+      : '<tr><td colspan="6" class="admin-table-empty">No pending operator requests.</td></tr>'
+    const requestSection = `<section class="panel admin-panel"><div class="admin-panel-heading"><h2>${icon('settings', 17)} Operator access requests</h2><span class="admin-panel-note">${operatorRequests.length} pending</span></div><div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>#</th><th>Applicant</th><th>Email</th><th>Requested</th><th>Approve</th><th>Decline</th></tr></thead><tbody>${operatorRequestRows}</tbody></table></div></section>`
+    const userSection = `<section class="panel admin-panel"><div class="admin-panel-heading"><h2>${icon('grid', 17)} Users management</h2><label class="admin-table-search">${icon('search', 14)}<input data-admin-table-search="CUSTOMER" placeholder="Search users by name, email..."></label></div><div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>#</th><th>Name</th><th>Email</th><th>Joined</th><th>Status</th><th>Actions</th></tr></thead><tbody>${accountRows(customers, 'CUSTOMER')}</tbody></table></div></section>`
+    const operatorSection = `<section class="panel admin-panel"><div class="admin-panel-heading"><h2>${icon('settings', 17)} Operators management</h2><label class="admin-table-search">${icon('search', 14)}<input data-admin-table-search="OPERATOR" placeholder="Search operators by name, email..."></label></div><div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>#</th><th>Name</th><th>Email</th><th>Assigned machines</th><th>Status</th><th>Actions</th></tr></thead><tbody>${accountRows(operators, 'OPERATOR')}</tbody></table></div></section>`
+    const machineSection = `<section class="panel admin-panel"><div class="admin-panel-heading"><h2>${icon('pin', 17)} Machines</h2><span class="admin-panel-note">${this.machines.length} total</span></div><div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>#</th><th>Machine ID</th><th>Location</th><th>Status</th><th>Details</th></tr></thead><tbody>${machineRows}</tbody></table></div></section>`
+    const assignmentSection = `<section class="panel admin-panel"><div class="admin-panel-heading"><h2>${icon('repeat', 17)} Machine assignment</h2><span class="admin-panel-note">${assignedMachineCount} of ${this.machines.length} assigned</span></div><p class="audit-log-intro">Assign each machine to an active operator. Changes are recorded in the audit log.</p><div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Machine</th><th>Assigned operator</th><th>Status</th></tr></thead><tbody>${assignmentRows}</tbody></table></div></section>`
+    const supportSection = `<section class="panel admin-panel"><div class="admin-panel-heading"><h2>${icon('help', 17)} Support / issues</h2><span class="admin-panel-note">${openComplaints.length} open</span></div><div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>#</th><th>Type</th><th>From</th><th>Subject</th><th>Status</th><th>Actions</th></tr></thead><tbody>${complaintRows}</tbody></table></div></section>`
+    const auditRows = this.adminAuditLog.map(entry => {
+      const changes = Object.entries(entry.changes || {}).map(([field, value]) => {
+        const change = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+        const formatted = (item: unknown) => escapeHtml(typeof item === 'string' ? item : JSON.stringify(item))
+        return `<span><strong>${escapeHtml(field)}</strong>${change && ('before' in change || 'after' in change) ? `: ${formatted(change.before ?? '—')} → ${formatted(change.after ?? '—')}` : `: ${formatted(value)}`}</span>`
+      }).join('')
+      return `<tr><td><strong>${escapeHtml(entry.actorName)}</strong><small>${escapeHtml(entry.actorEmail)}</small></td><td>${escapeHtml(entry.action)}</td><td><strong>${escapeHtml(entry.targetLabel)}</strong><small>${escapeHtml(entry.targetType)}${entry.targetId ? ` · ${escapeHtml(entry.targetId)}` : ''}</small></td><td class="audit-change-list">${changes || '—'}</td><td>${new Date(entry.createdAt).toLocaleString()}</td></tr>`
+    }).join('')
+    const auditSection = `<section class="panel admin-panel audit-log-panel"><div class="admin-panel-heading"><h2>${icon('clock', 17)} Admin audit log</h2><button class="button-secondary" data-action="refresh">${icon('repeat', 14)} Refresh</button></div><p class="audit-log-intro">A record of administrative changes, including who made them and when. Most recent actions appear first.</p><div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Administrator</th><th>Action</th><th>Target</th><th>Changes</th><th>Date & time</th></tr></thead><tbody>${auditRows || `<tr><td colspan="5" class="admin-table-empty">No admin changes recorded yet.</td></tr>`}</tbody></table></div><p class="audit-log-note">Showing the latest ${this.adminAuditLog.length} audit entries.</p></section>`
+    const pageTitle: Partial<Record<View, string>> = { accounts: 'Users', 'admin-requests': 'Operator requests', 'admin-users': 'Users', 'admin-operators': 'Operators', 'admin-machines': 'Machines', 'admin-assignment': 'Machine assignment', 'admin-support': 'Support / issues', 'admin-audit': 'Audit log' }
+    const dashboard = `<section class="admin-welcome"><div><h1>Welcome ${escapeHtml(this.user?.name.split(' ')[0] || 'Admin')} <span>👋</span></h1><p>Manage users, operators, vending machines and support requests.</p></div><div class="admin-header-actions"><button class="admin-icon-button" data-action="refresh" aria-label="Refresh dashboard">${icon('repeat', 18)}</button><span class="admin-avatar">${escapeHtml(initials(this.user?.name || 'Admin'))}</span><strong class="admin-header-name">${escapeHtml(this.user?.name || 'Admin')}</strong></div></section>
+    <section class="admin-kpis"><article class="admin-kpi"><span class="admin-kpi-icon blue">${icon('grid', 21)}</span><div><small>Total users</small><strong>${customers.length + operators.length}</strong><span>${customers.length} customers</span></div></article><article class="admin-kpi"><span class="admin-kpi-icon green">${icon('settings', 21)}</span><div><small>Total operators</small><strong>${operators.length}</strong><span>${activeOperators.length} active</span></div></article><article class="admin-kpi"><span class="admin-kpi-icon violet">${icon('pin', 21)}</span><div><small>Total machines</small><strong>${this.machines.length}</strong><span>${assignedMachineCount} assigned</span></div></article><article class="admin-kpi"><span class="admin-kpi-icon orange">${icon('help', 21)}</span><div><small>Open issues</small><strong>${openComplaints.length}</strong><span>${openComplaints.length ? 'Needs attention' : 'All caught up'}</span></div></article></section>
+    <section class="admin-shortcuts" aria-label="Dashboard shortcuts"><button data-view="admin-users"><span class="admin-shortcut-icon blue">${icon('grid', 17)}</span><span><strong>Manage users</strong><small>Ban, unban and review accounts</small></span>${icon('arrow', 15)}</button><button data-view="admin-operators"><span class="admin-shortcut-icon green">${icon('settings', 17)}</span><span><strong>Manage operators</strong><small>View active operators and coverage</small></span>${icon('arrow', 15)}</button><button data-view="admin-machines"><span class="admin-shortcut-icon violet">${icon('pin', 17)}</span><span><strong>Machine assignment</strong><small>Assign machines to operators</small></span>${icon('arrow', 15)}</button><button data-view="admin-support"><span class="admin-shortcut-icon orange">${icon('help', 17)}</span><span><strong>Support & issues</strong><small>Review open customer requests</small></span>${icon('arrow', 15)}</button><button data-view="admin-audit"><span class="admin-shortcut-icon blue">${icon('clock', 17)}</span><span><strong>Admin audit log</strong><small>See recent changes by administrators</small></span>${icon('arrow', 15)}</button></section>`
+    const pageContent = this.view === 'operations' ? dashboard
+      : this.view === 'admin-requests' ? requestSection
+        : this.view === 'admin-users' || this.view === 'accounts' ? userSection
+          : this.view === 'admin-operators' ? operatorSection
+            : this.view === 'admin-machines' ? machineSection
+              : this.view === 'admin-assignment' ? assignmentSection
+                : this.view === 'admin-support' ? supportSection
+                  : this.view === 'admin-audit' ? auditSection
+                    : dashboard
+    const heading = this.view === 'operations' ? '' : `<section class="admin-page-heading"><div><span class="section-kicker">ADMIN CONTROL CENTER</span><h1>${escapeHtml(pageTitle[this.view] || 'Admin')}</h1><p>Manage ${escapeHtml((pageTitle[this.view] || 'admin').toLowerCase())} and review recent activity.</p></div><button class="button-secondary" data-action="refresh">${icon('repeat', 15)} Refresh</button></section>`
+    return `${heading}${pageContent}`
+  }
+
+  private renderVendorDashboard() {
+    const overview = this.overview
+    if (!overview) return `<section class="ops-welcome"><div><div class="eyebrow"><span class="eyebrow-line"></span> OPERATIONS DASHBOARD</div><h1>Welcome back, <em>${escapeHtml(this.user?.name.split(' ')[0] || 'there')}.</em></h1><p>Loading your latest machine, inventory, and sales data.</p></div><button class="button-secondary" data-action="refresh">${icon('clock', 16)} Refresh</button></section><div class="loading-card">Loading live operations data…</div>`
+
+    const trendByDate = new Map((overview.salesTrend || []).map(row => [row.date, row]))
+    const end = new Date()
+    const start = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate()))
+    start.setUTCDate(start.getUTCDate() - (this.salesRange - 1))
+    const chartRows = Array.from({ length: this.salesRange }, (_, index) => {
+      const date = new Date(start)
+      date.setUTCDate(start.getUTCDate() + index)
+      const key = date.toISOString().slice(0, 10)
+      return { date: key, sales: trendByDate.get(key)?.sales || 0 }
+    })
+    const maxSales = Math.max(1, ...chartRows.map(row => row.sales))
+    const chartLabels = new Set([0, Math.floor((this.salesRange - 1) / 2), this.salesRange - 1])
+    const topProducts = overview.topProducts || []
+    const maxProductSales = Math.max(1, ...topProducts.map(row => row.units))
+    const assignedMachines = this.user?.role === 'OPERATOR'
+      ? this.machines.filter(machine => (typeof machine.vendor === 'string' ? machine.vendor : machine.vendor?._id) === this.user?._id)
+      : this.machines
+    const machines = overview.machineAttendance?.length
+      ? overview.machineAttendance.map(row => ({ ...row, machine: this.machines.find(machine => machine._id === row._id) }))
+      : assignedMachines.map(machine => ({ ...machine, machine, onlineOrdersToday: 0, revenueToday: 0, utilization: 0 }))
+    const restockRows = this.inventory.slice(0, 10)
+    const openAlerts = overview.alerts.slice(0, 5)
+    const recentOrders = overview.recentOrders.slice(0, 5)
+    const openComplaints = this.complaints.filter(row => row.status === 'OPEN').slice(0, 4)
+    const machineTiles = machines.slice(0, 6).map(row => {
+      const machine = row.machine || this.machines.find(item => item._id === row._id)
+      if (!machine) return ''
+      const available = this.inventory.filter(item => item.machine._id === machine._id).reduce((total, item) => total + (item.available ?? Math.max(0, item.quantity - item.reserved)), 0)
+      const stockRows = this.inventory.filter(item => item.machine._id === machine._id).length
+      return `<article class="vendor-machine-card machine-status-row"><div class="vendor-machine-top"><span class="machine-status-icon">${icon('pin', 17)}</span><div><strong>${escapeHtml(machine.name)}</strong><small>${escapeHtml(machine.code)} · ${escapeHtml(machine.address)}</small></div><span class="vendor-status status-${machine.status.toLowerCase()}"><i></i>${escapeHtml(machine.status.toLowerCase())}</span></div><div class="vendor-machine-stats"><span>${stockRows} products</span><span>${available} units available</span><span>${row.onlineOrdersToday || 0} pickups today</span></div><div class="vendor-machine-actions">${this.user?.role === 'ADMIN' ? `<button class="text-button" data-edit-machine="${machine._id}">Edit</button>` : `<button class="text-button" data-machine-status="${machine._id}" data-status="${machine.status}">${machine.status === 'ONLINE' ? 'Set status' : 'Bring online'}</button>`}</div></article>`
+    }).join('')
+    const machineEmptyMessage = this.user?.role === 'OPERATOR'
+      ? 'No machines are assigned to your operator account yet. Ask an administrator to assign your machines.'
+      : 'No machines have been assigned yet.'
+    const inventoryEmptyMessage = this.user?.role === 'OPERATOR' && machines.length === 0
+      ? 'Inventory will appear after an administrator assigns machines to your operator account.'
+      : 'No inventory records yet. Add stock to get started.'
+    const inventoryRows = restockRows.map(row => {
+      const available = row.available ?? Math.max(0, row.quantity - row.reserved)
+      const low = available <= row.lowStockThreshold
+      const discountActive = this.discountIsActive(row.expirationDate, row.discountPercent)
+      const effectivePrice = discountActive ? Math.round(row.product.price * (1 - (row.discountPercent || 0) / 100) * 100) / 100 : row.product.price
+      return `<tr><td><span class="dashboard-product">${imageFor(row.product)}<span>${escapeHtml(row.product.name)}</span></span></td><td>${escapeHtml(row.machine.name)}</td><td>${this.priceMarkup({ price: effectivePrice, originalPrice: discountActive ? row.product.price : undefined, discountPercent: discountActive ? row.discountPercent : undefined })}</td><td class="${available === 0 ? 'stock-zero' : low ? 'stock-low' : ''}">${available}</td><td><span class="inventory-state ${available === 0 ? 'out' : low ? 'low' : 'in'}"><i></i>${row.expirationDate && new Date(row.expirationDate).getTime() < Date.now() ? 'Expired · blocked' : available === 0 ? 'Out of stock' : low ? 'Low stock' : 'In stock'}</span></td><td><button class="text-button" data-edit-inventory="${row._id}">Edit</button></td></tr>`
+    }).join('')
+
+    return `<section class="ops-welcome vendor-welcome"><div><div class="eyebrow"><span class="eyebrow-line"></span> ${this.user?.role === 'ADMIN' ? 'ADMIN DASHBOARD' : 'VENDOR DASHBOARD'}</div><h1>Welcome back, <em>${escapeHtml(this.user?.name.split(' ')[0] || 'there')}.</em></h1><p>Manage your vending machines, products, inventory, and sales all in one place.</p></div><button class="button-secondary" data-action="refresh">${icon('clock', 16)} Refresh dashboard</button></section>
+    <section class="vendor-kpis"><article class="vendor-kpi"><span class="vendor-kpi-icon blue">${icon('chart', 20)}</span><div><small>Total revenue · 30 days</small><strong>${this.money(overview.revenue30d)}</strong></div><span class="vendor-kpi-note">${overview.sales30d} completed sales</span></article><article class="vendor-kpi"><span class="vendor-kpi-icon green">${icon('cart', 20)}</span><div><small>Total sales · 30 days</small><strong>${overview.sales30d.toLocaleString()}</strong></div><span class="vendor-kpi-note">Completed pickups</span></article><article class="vendor-kpi"><span class="vendor-kpi-icon violet">${icon('wifi', 20)}</span><div><small>Active machines</small><strong>${overview.machines.online}<small class="kpi-total"> / ${overview.machines.total}</small></strong></div><span class="vendor-kpi-note">${overview.machines.total - overview.machines.online} need attention</span></article><article class="vendor-kpi"><span class="vendor-kpi-icon orange">${icon('box', 20)}</span><div><small>Low-stock items</small><strong>${overview.inventory.lowStock}</strong></div><span class="vendor-kpi-note">${overview.inventory.rows} inventory records</span></article></section>
+    <div class="vendor-dashboard-grid"><div class="vendor-dashboard-main">
+      <section class="panel vendor-panel sales-chart-panel" id="sales-chart"><div class="vendor-panel-heading"><div><span class="section-kicker">SALES OVERVIEW</span><h2>Sales <em>trend.</em></h2></div><div class="range-switch" aria-label="Sales chart range"><button data-sales-range="7" class="${this.salesRange === 7 ? 'selected' : ''}">7 days</button><button data-sales-range="30" class="${this.salesRange === 30 ? 'selected' : ''}">30 days</button></div></div><div class="sales-chart-summary"><strong>${overview.sales30d.toLocaleString()}<small> sales in the last 30 days</small></strong><span>${this.money(overview.revenue30d)} revenue</span></div>${overview.salesTrend.length ? `<div class="sales-chart" role="img" aria-label="Daily completed sales for the last ${this.salesRange} days">${chartRows.map((row, index) => `<div class="sales-bar-column" title="${row.date}: ${row.sales} sales"><span class="sales-bar" style="height:${Math.max(row.sales ? 8 : 2, row.sales / maxSales * 100)}%"></span><small>${chartLabels.has(index) ? new Date(`${row.date}T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' }) : ''}</small></div>`).join('')}</div>` : `<div class="dashboard-empty">Completed sales will appear here as orders are picked up.</div>`}</section>
+      <section class="panel vendor-panel machines-dashboard-panel" id="machines"><div class="vendor-panel-heading"><div><span class="section-kicker">CONNECTED LOCATIONS</span><h2>My <em>machines.</em></h2></div><span class="panel-count">${machines.length} locations</span>${['ADMIN', 'OPERATOR'].includes(this.user?.role || '') ? `<button class="button-secondary manage-stock-button" data-action="machine-editor">${icon('plus', 14)} Add machine</button>` : ''}</div><div class="vendor-machine-grid">${machineTiles || `<div class="dashboard-empty">${machineEmptyMessage}</div>`}</div></section>
+      ${this.renderSuggestionBoard(true)}
+      <section class="panel vendor-panel inventory-dashboard-panel" id="inventory"><div class="vendor-panel-heading"><div><span class="section-kicker">INVENTORY OVERVIEW</span><h2>Stock <em>at a glance.</em></h2></div><button class="button-secondary manage-stock-button" data-action="inventory-editor">${icon('plus', 14)} Manage inventory</button></div><div class="dashboard-table-wrap"><table class="dashboard-inventory-table"><thead><tr><th>Product</th><th>Machine</th><th>Price</th><th>Stock</th><th>Status</th><th>Action</th></tr></thead><tbody>${inventoryRows || `<tr><td colspan="6" class="dashboard-empty">${inventoryEmptyMessage}</td></tr>`}</tbody></table></div>${this.inventory.length > restockRows.length ? `<p class="dashboard-table-note">Showing ${restockRows.length} of ${this.inventory.length} inventory records.</p>` : ''}</section>
+      <section class="panel vendor-panel catalog-dashboard-panel" id="products"><div class="vendor-panel-heading"><div><span class="section-kicker">CATALOG MANAGEMENT</span><h2>Products <em>on the shelf.</em></h2></div><button class="button-secondary manage-stock-button" data-action="product-editor">${icon('plus', 14)} Add product</button></div><div class="dashboard-catalog-list">${this.catalogProducts.slice(0, 6).map(product => `<div class="dashboard-catalog-row"><span class="dashboard-product">${imageFor(product)}<span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.sku)} · ${escapeHtml(product.category)}</small></span></span><strong>${this.money(product.price)}</strong><button class="text-button" data-edit-product="${product._id}">Edit</button>${this.user?.role === 'ADMIN' ? `<button class="text-button danger" data-archive-product="${product._id}">Archive</button>` : ''}</div>`).join('') || '<div class="dashboard-empty">No active catalog products.</div>'}</div></section>
+      <section class="panel vendor-panel forecast-panel" id="restock-requests"><div class="vendor-panel-heading"><div><span class="section-kicker">DEMAND PLANNING</span><h2>Restock <em>forecast.</em></h2></div><span class="panel-count">${this.forecast.length} products</span></div><div class="dashboard-table-wrap"><table class="dashboard-inventory-table forecast-dashboard-table"><thead><tr><th>Product / machine</th><th>Sold</th><th>Daily avg</th><th>Days left</th><th>Suggested</th></tr></thead><tbody>${this.forecast.slice(0, 8).map(row => `<tr><td><strong>${escapeHtml(row.product.name)}</strong><small>${escapeHtml(row.machine.name)}</small></td><td>${row.unitsSold}</td><td>${row.dailyAverage.toFixed(1)}</td><td>${row.daysRemaining === null ? '—' : `${row.daysRemaining}d`}</td><td>${row.suggestedRestock > 0 ? `<button class="restock-button" data-restock="${row.inventoryId}" data-quantity="${row.suggestedRestock}">+${row.suggestedRestock} units</button>` : '—'}</td></tr>`).join('') || `<tr><td colspan="5" class="dashboard-empty">Sales history will build a useful forecast.</td></tr>`}</tbody></table></div></section>
+    </div><aside class="vendor-dashboard-aside">
+      <section class="panel vendor-panel top-products-panel"><div class="vendor-panel-heading"><div><span class="section-kicker">BEST SELLERS</span><h2>Top <em>products.</em></h2></div></div>${topProducts.length ? `<div class="top-products-list">${topProducts.map((row, index) => `<div class="top-product-row"><span class="top-product-rank rank-${index + 1}">${index + 1}</span><div><strong>${escapeHtml(row.name)}</strong><small>${row.units.toLocaleString()} units sold</small></div><span class="top-product-share"><i style="width:${Math.max(8, row.units / maxProductSales * 100)}%"></i></span></div>`).join('')}</div>` : '<div class="dashboard-empty">Top products appear after completed sales.</div>'}</section>
+      <section class="panel vendor-panel alerts-dashboard-panel" id="alerts"><div class="vendor-panel-heading"><div><span class="section-kicker">INVENTORY HEALTH</span><h2>Stock <em>alerts.</em></h2></div><span class="panel-count alert-count">${overview.alerts.length} open</span></div>${openAlerts.length ? `<div class="dashboard-alert-list">${openAlerts.map(alert => `<div class="dashboard-alert-row"><span class="alert-severity ${alert.severity.toLowerCase()}"></span><div><strong>${escapeHtml(alert.product?.name || alert.message)}</strong><small>${escapeHtml(alert.machine?.name || 'Machine')} · ${new Date(alert.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</small></div><button class="resolve-alert" data-resolve="${alert._id}" aria-label="Resolve alert">${icon('check', 15)}</button></div>`).join('')}</div>` : '<div class="dashboard-empty">No open stock alerts. You’re all caught up.</div>'}</section>
+      <section class="panel vendor-panel transactions-panel" id="orders-panel"><div class="vendor-panel-heading"><div><span class="section-kicker">RECENT ACTIVITY</span><h2>Recent <em>orders.</em></h2></div><button class="text-button" data-view="orders">View all ${icon('arrow', 14)}</button></div>${recentOrders.length ? `<div class="dashboard-order-list">${recentOrders.map(order => `<div class="dashboard-order-row"><span class="order-status-icon status-${order.status.toLowerCase()}">${icon(order.status === 'DISPENSED' ? 'check' : 'cart', 15)}</span><div><strong>${escapeHtml(order.code)}</strong><small>${escapeHtml(order.machine?.name || 'VendSmart machine')} · ${new Date(order.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</small></div><b>${this.money(order.total)}</b></div>`).join('')}</div>` : '<div class="dashboard-empty">Recent orders will appear here.</div>'}</section>
+      <section class="panel vendor-panel support-dashboard-panel" id="support-panel"><div class="vendor-panel-heading"><div><span class="section-kicker">CUSTOMER SUPPORT</span><h2>Open <em>requests.</em></h2></div><button class="text-button" data-view="support">View all ${icon('arrow', 14)}</button></div>${openComplaints.length ? `<div class="dashboard-alert-list">${openComplaints.map(complaint => `<button class="dashboard-complaint-row" data-resolve-complaint="${complaint._id}"><span class="alert-severity high"></span><span><strong>${escapeHtml(complaint.subject)}</strong><small>${escapeHtml(complaint.customer?.name || 'Customer')} · ${escapeHtml(complaint.reference)}</small></span>${icon('arrow', 14)}</button>`).join('')}</div>` : '<div class="dashboard-empty">No open support requests.</div>'}</section>
+    </aside></div>`
+  }
+
+  private renderVendorPage(view: VendorView) {
+    const pageDetails: Record<VendorView, { title: string; description: string; selectors: string[] }> = {
+      'vendor-machines': { title: 'My machines', description: 'View and manage the vending machines assigned to your account.', selectors: ['#machines'] },
+      'vendor-products': { title: 'Products', description: 'Manage the products available in your vending catalog.', selectors: ['#products'] },
+      'vendor-inventory': { title: 'Inventory', description: 'Review stock, expiry dates, discounts, and restock recommendations.', selectors: ['#inventory', '#restock-requests'] },
+      'vendor-sales': { title: 'Sales & analytics', description: 'Track sales trends and see which products are performing best.', selectors: ['#sales-chart', '.top-products-panel'] },
+      'vendor-orders': { title: 'Orders', description: 'Review recent orders and pickup activity across your machines.', selectors: ['#orders-panel'] },
+      'vendor-suggestions': { title: 'Product suggestions', description: 'Review customer requests and add popular products to your catalog.', selectors: ['#admin-suggestions'] },
+      'vendor-alerts': { title: 'Alerts', description: 'Review stock and machine alerts that may need your attention.', selectors: ['#alerts'] },
+      'vendor-support': { title: 'Support requests', description: 'Review and respond to open customer support requests.', selectors: ['#support-panel'] },
+    }
+    const page = pageDetails[view]
+    if (!this.overview) return `<section class="ops-welcome vendor-welcome vendor-page-welcome"><div><div class="eyebrow"><span class="eyebrow-line"></span> VENDOR WORKSPACE</div><h1>${escapeHtml(page.title)}<em>.</em></h1><p>${escapeHtml(page.description)}</p></div><button class="button-secondary" data-action="refresh">${icon('clock', 16)} Refresh</button></section><div class="loading-card">Loading vendor data…</div>`
+    if (view === 'vendor-inventory') {
+      const forecastTemplate = document.createElement('template')
+      forecastTemplate.innerHTML = this.renderVendorDashboard()
+      const forecast = forecastTemplate.content.querySelector<HTMLElement>('#restock-requests')?.outerHTML || ''
+      return `<section class="ops-welcome vendor-welcome vendor-page-welcome"><div><div class="eyebrow"><span class="eyebrow-line"></span> VENDOR WORKSPACE</div><h1>${escapeHtml(page.title)}<em>.</em></h1><p>${escapeHtml(page.description)}</p></div><button class="button-secondary" data-action="refresh">${icon('clock', 16)} Refresh</button></section><div class="vendor-page-panels">${this.renderMachineInventoryGroups()}${forecast}</div>`
+    }
+    const template = document.createElement('template')
+    template.innerHTML = this.renderVendorDashboard()
+    template.content.querySelectorAll<HTMLElement>('[data-view="orders"]').forEach(node => { node.dataset.view = 'vendor-orders' })
+    template.content.querySelectorAll<HTMLElement>('[data-view="support"]').forEach(node => { node.dataset.view = 'vendor-support' })
+    const panels = page.selectors.map(selector => template.content.querySelector<HTMLElement>(selector)?.outerHTML || '').join('')
+    return `<section class="ops-welcome vendor-welcome vendor-page-welcome"><div><div class="eyebrow"><span class="eyebrow-line"></span> VENDOR WORKSPACE</div><h1>${escapeHtml(page.title)}<em>.</em></h1><p>${escapeHtml(page.description)}</p></div><button class="button-secondary" data-action="refresh">${icon('clock', 16)} Refresh</button></section><div class="vendor-page-panels">${panels || '<div class="loading-card">Loading vendor data…</div>'}</div>`
+  }
+
+  private renderMachineInventoryGroups() {
+    const machines = new Map<string, Machine>()
+    for (const machine of this.machines) {
+      if (this.user?.role === 'OPERATOR' && (typeof machine.vendor === 'string' ? machine.vendor : machine.vendor?._id) !== this.user._id) continue
+      machines.set(machine._id, machine)
+    }
+    for (const row of this.inventory) machines.set(row.machine._id, row.machine)
+
+    const groups = [...machines.values()].map(machine => {
+      const rows = this.inventory.filter(row => row.machine._id === machine._id)
+      const availableUnits = rows.reduce((total, row) => total + (row.available ?? Math.max(0, row.quantity - row.reserved)), 0)
+      const stockRows = rows.map(row => {
+        const available = row.available ?? Math.max(0, row.quantity - row.reserved)
+        const low = available <= row.lowStockThreshold
+        const expired = Boolean(row.expirationDate && new Date(row.expirationDate).getTime() < Date.now())
+        const discountActive = this.discountIsActive(row.expirationDate, row.discountPercent)
+        const effectivePrice = discountActive ? Math.round(row.product.price * (1 - (row.discountPercent || 0) / 100) * 100) / 100 : row.product.price
+        const status = expired ? 'Expired · blocked' : available === 0 ? 'Out of stock' : low ? 'Low stock' : 'In stock'
+        return `<tr><td><span class="dashboard-product">${imageFor(row.product)}<span>${escapeHtml(row.product.name)}</span></span></td><td>${this.priceMarkup({ price: effectivePrice, originalPrice: discountActive ? row.product.price : undefined, discountPercent: discountActive ? row.discountPercent : undefined })}</td><td class="${available === 0 ? 'stock-zero' : low ? 'stock-low' : ''}">${available} / ${row.quantity}</td><td><span class="inventory-state ${available === 0 ? 'out' : low ? 'low' : 'in'}"><i></i>${status}</span></td><td><button class="text-button" data-edit-inventory="${row._id}">Edit</button></td></tr>`
+      }).join('')
+      return `<details class="inventory-machine-group"><summary><span class="machine-status-icon">${icon('pin', 17)}</span><span class="inventory-machine-name"><strong>${escapeHtml(machine.name)}</strong><small>${escapeHtml(machine.code)} · ${escapeHtml(machine.address)}</small></span><span class="inventory-machine-count">${rows.length} product${rows.length === 1 ? '' : 's'} · ${availableUnits} units</span><span class="vendor-status status-${machine.status.toLowerCase()}"><i></i>${escapeHtml(machine.status.toLowerCase())}</span><span class="inventory-machine-chevron">${icon('chevron', 16)}</span></summary><div class="inventory-machine-stock">${rows.length ? `<div class="dashboard-table-wrap"><table class="dashboard-inventory-table"><thead><tr><th>Product</th><th>Price</th><th>Stock</th><th>Status</th><th>Action</th></tr></thead><tbody>${stockRows}</tbody></table></div>` : `<div class="dashboard-empty">No inventory assigned to this machine yet.</div>`}</div></details>`
+    }).join('')
+    return `<section class="panel vendor-panel inventory-dashboard-panel" id="inventory"><div class="vendor-panel-heading"><div><span class="section-kicker">INVENTORY BY MACHINE</span><h2>Choose a machine to <em>view its stock.</em></h2></div><button class="button-secondary manage-stock-button" data-action="inventory-editor">${icon('plus', 14)} Manage inventory</button></div><p class="inventory-estimate-note">Missing dates show clearly marked demo estimates. Enter the real batch date with Edit to enable expiry blocking and discounts.</p><div class="inventory-machine-list">${groups || '<div class="dashboard-empty">No machines are assigned to your account yet.</div>'}</div></section>`
+  }
+
   private renderOperationsPanel() {
+    if (!this.user || !['ADMIN', 'OPERATOR'].includes(this.user.role)) return `<div class="empty-state"><h3>Operations access required</h3><p>Sign in with an operator or administrator account to continue.</p><button class="button-primary" data-action="account">Sign in</button></div>`
+    return this.overview ? this.renderVendorDashboard() : this.renderLegacyOperationsPanel()
+  }
+
+  private renderLegacyOperationsPanel() {
     if (!this.user || !['ADMIN', 'OPERATOR'].includes(this.user.role)) return `<div class="empty-state"><h3>Operations access required</h3><p>Sign in with an operator account to continue.</p><button class="button-primary" data-action="account">Sign in</button></div>`
     const overview = this.overview
 
@@ -529,6 +1029,45 @@ class VendSmartApp {
     }
   }
 
+  private async submitSuggestion(form: FormData) {
+    if (this.user?.role !== 'CUSTOMER') return this.toast('Sign in with a customer account to submit an idea.', 'error')
+    const body = {
+      name: String(form.get('name') || '').trim(),
+      category: document.querySelector<HTMLSelectElement>('#suggestion-form select[name="name"]')?.selectedOptions[0]?.dataset.category || '',
+      details: String(form.get('details') || '').trim(),
+    }
+    const button = document.querySelector<HTMLButtonElement>('#suggestion-form button[type="submit"]')
+    if (button) { button.disabled = true; button.textContent = 'Sharing…' }
+    try {
+      const suggestion = await this.request<ProductSuggestion>('/suggestions', { method: 'POST', body: JSON.stringify(body) })
+      this.suggestions = await this.request<ProductSuggestion[]>('/suggestions')
+      this.render()
+      this.toast(suggestion.votes > 1 ? 'That item was already suggested — your vote has been added.' : 'Your product suggestion has been shared.', 'success')
+    } catch (error) {
+      this.toast((error as Error).message, 'error')
+      if (button) { button.disabled = false; button.textContent = 'Share suggestion' }
+    }
+  }
+
+  private async toggleSuggestionVote(id: string) {
+    if (this.user?.role !== 'CUSTOMER') return this.toast('Sign in with a customer account to vote.', 'error')
+    try {
+      const suggestion = await this.request<ProductSuggestion>(`/suggestions/${id}/vote`, { method: 'POST' })
+      this.suggestions = this.suggestions.map(row => row._id === id ? suggestion : row)
+      this.render()
+    } catch (error) { this.toast((error as Error).message, 'error') }
+  }
+
+  private async reviewSuggestion(id: string, status: 'ADDED' | 'DECLINED', productId?: string) {
+    if (!this.user || !['OPERATOR', 'ADMIN'].includes(this.user.role)) return this.toast('Operator access is required to review suggestions.', 'error')
+    if (status === 'DECLINED' && !window.confirm('Decline this product suggestion?')) return
+    try {
+      await this.request<ProductSuggestion>(`/suggestions/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status, ...(productId ? { productId } : {}) }) })
+      await this.load()
+      this.toast(status === 'ADDED' ? 'Suggestion marked as added to the catalog.' : 'Suggestion declined.', 'success')
+    } catch (error) { this.toast((error as Error).message, 'error') }
+  }
+
   private openComplaintResolver(id: string) {
     const complaint = this.complaints.find(row => row._id === id)
     if (!complaint) return this.toast('Complaint could not be found. Refresh and try again.', 'error')
@@ -565,9 +1104,25 @@ class VendSmartApp {
   }
 
   private bindEvents() {
-    document.querySelectorAll<HTMLElement>('[data-view]').forEach(node => node.addEventListener('click', () => { const view = node.dataset.view as View; this.view = view; location.hash = view === 'store' ? 'store' : view; this.render() }))
+    document.querySelector<HTMLElement>('.staff-menu-toggle')?.addEventListener('click', event => {
+      const button = event.currentTarget as HTMLElement
+      const shell = button.closest<HTMLElement>('.app-shell')
+      const isOpen = shell?.classList.toggle('mobile-nav-open') || false
+      button.setAttribute('aria-expanded', String(isOpen))
+      button.setAttribute('aria-label', isOpen ? 'Close navigation menu' : 'Open navigation menu')
+      button.innerHTML = icon(isOpen ? 'close' : 'menu', 20)
+    })
+    document.querySelector<HTMLElement>('.staff-nav-backdrop')?.addEventListener('click', () => {
+      const shell = document.querySelector<HTMLElement>('.app-shell')
+      shell?.classList.remove('mobile-nav-open')
+      const button = shell?.querySelector<HTMLElement>('.staff-menu-toggle')
+      button?.setAttribute('aria-expanded', 'false')
+      button?.setAttribute('aria-label', 'Open navigation menu')
+      if (button) button.innerHTML = icon('menu', 20)
+    })
+    document.querySelectorAll<HTMLElement>('[data-view]').forEach(node => node.addEventListener('click', () => { const view = node.dataset.view as View; this.view = view; location.hash = view === 'store' ? 'store' : view; if (view === 'admin-audit') void this.load(); else this.render() }))
     document.querySelectorAll<HTMLSelectElement>('[data-currency]').forEach(node => node.addEventListener('change', () => this.setCurrency(node.value as CurrencyCode)))
-    document.querySelectorAll<HTMLElement>('[data-action]').forEach(node => node.addEventListener('click', () => void this.handleAction(node.dataset.action || '')))
+    document.querySelectorAll<HTMLElement>('[data-action]').forEach(node => node.addEventListener('click', () => void this.handleAction(node.dataset.action || '', node)))
     document.querySelectorAll<HTMLElement>('[data-category]').forEach(node => node.addEventListener('click', () => { this.category = node.dataset.category || 'All items'; this.render() }))
     document.querySelectorAll<HTMLElement>('[data-favorite]').forEach(node => node.addEventListener('click', () => void this.toggleFavorite(node.dataset.favorite!)))
     document.querySelectorAll<HTMLElement>('[data-add]').forEach(node => node.addEventListener('click', () => { const id = node.dataset.add!; const product = this.products.find(row => row._id === id); if (product?.available !== undefined && (this.cart.get(id) || 0) >= product.available) return this.toast('That is all that is currently in stock.', 'error'); this.cart.set(id, (this.cart.get(id) || 0) + 1); this.render(); this.toast(`${product?.name || 'Item'} added to your bag.`, 'success') }))
@@ -586,6 +1141,10 @@ class VendSmartApp {
     document.querySelectorAll<HTMLElement>('[data-report]').forEach(node => node.addEventListener('click', () => this.reportOnOrder(node.dataset.report!)))
     document.querySelectorAll<HTMLElement>('[data-resolve-complaint]').forEach(node => node.addEventListener('click', () => this.openComplaintResolver(node.dataset.resolveComplaint!)))
     document.querySelectorAll<HTMLFormElement>('#complaint-form').forEach(node => node.addEventListener('submit', event => { event.preventDefault(); void this.submitComplaint(new FormData(event.currentTarget as HTMLFormElement)) }))
+    document.querySelector<HTMLFormElement>('#suggestion-form')?.addEventListener('submit', event => { event.preventDefault(); void this.submitSuggestion(new FormData(event.currentTarget as HTMLFormElement)) })
+    document.querySelectorAll<HTMLElement>('[data-vote-suggestion]').forEach(node => node.addEventListener('click', () => void this.toggleSuggestionVote(node.dataset.voteSuggestion!)))
+    document.querySelectorAll<HTMLElement>('[data-add-suggestion]').forEach(node => node.addEventListener('click', () => this.openProductEditor(undefined, node.dataset.addSuggestion)))
+    document.querySelectorAll<HTMLElement>('[data-decline-suggestion]').forEach(node => node.addEventListener('click', () => void this.reviewSuggestion(node.dataset.declineSuggestion!, 'DECLINED')))
     document.querySelectorAll<HTMLElement>('[data-pay-method]').forEach(node => node.addEventListener('click', () => {
       this.paymentMethod = node.dataset.payMethod === 'UPI' ? 'UPI' : 'CARD'
       document.querySelectorAll<HTMLElement>('[data-pay-method]').forEach(tab => { const selected = tab.dataset.payMethod === this.paymentMethod; tab.classList.toggle('selected', selected); tab.setAttribute('aria-selected', String(selected)) })
@@ -598,11 +1157,59 @@ class VendSmartApp {
     document.querySelectorAll<HTMLElement>('[data-edit-inventory]').forEach(node => node.addEventListener('click', () => this.openInventoryEditor(node.dataset.editInventory)))
     document.querySelectorAll<HTMLElement>('[data-edit-product]').forEach(node => node.addEventListener('click', () => this.openProductEditor(node.dataset.editProduct)))
     document.querySelectorAll<HTMLElement>('[data-edit-machine]').forEach(node => node.addEventListener('click', () => this.openMachineEditor(node.dataset.editMachine)))
+    document.querySelectorAll<HTMLElement>('[data-machine-details]').forEach(node => node.addEventListener('click', () => void this.openMachineDetails(node.dataset.machineDetails!)))
+    document.querySelectorAll<HTMLElement>('[data-set-ban]').forEach(node => node.addEventListener('click', () => void this.setAccountBan(node.dataset.setBan!, node.dataset.banned === 'true')))
+    document.querySelectorAll<HTMLElement>('[data-set-role]').forEach(node => node.addEventListener('click', () => void this.setAccountRole(node.dataset.setRole!, node.dataset.roleTarget as 'CUSTOMER' | 'OPERATOR')))
+    document.querySelectorAll<HTMLElement>('[data-review-operator-request]').forEach(node => node.addEventListener('click', () => void this.reviewOperatorRequest(node.dataset.reviewOperatorRequest!, node.dataset.approved === 'true')))
+    const applyAdminSearch = () => {
+      const globalQuery = document.querySelector<HTMLInputElement>('#admin-global-search')?.value.trim().toLowerCase() || ''
+      const tableQueries = new Map(Array.from(document.querySelectorAll<HTMLInputElement>('[data-admin-table-search]')).map(input => [input.dataset.adminTableSearch || '', input.value.trim().toLowerCase()]))
+      document.querySelectorAll<HTMLElement>('[data-admin-searchable]').forEach(row => {
+        const role = row.dataset.adminRole || ''
+        const rowSearch = row.dataset.adminSearch || ''
+        const tableQuery = tableQueries.get(role) || ''
+        row.hidden = !rowSearch.includes(globalQuery) || !rowSearch.includes(tableQuery)
+      })
+    }
+    document.querySelector<HTMLInputElement>('#admin-global-search')?.addEventListener('input', applyAdminSearch)
+    document.querySelectorAll<HTMLInputElement>('[data-admin-table-search]').forEach(input => input.addEventListener('input', applyAdminSearch))
+    document.querySelectorAll<HTMLSelectElement>('[data-admin-machine-assignment]').forEach(select => select.addEventListener('change', async () => {
+      const machineId = select.dataset.adminMachineAssignment!
+      const machine = this.machines.find(row => row._id === machineId)
+      if (!machine) return
+      const previousVendorId = typeof machine.vendor === 'string' ? machine.vendor : machine.vendor?._id || ''
+      const vendorId = select.value
+      select.disabled = true
+      try {
+        await this.request<Machine>(`/machines/${machineId}`, { method: 'PATCH', body: JSON.stringify({ vendorId: vendorId || null }) })
+        await this.load()
+        this.toast('Machine operator assignment saved.', 'success')
+      } catch (error) {
+        select.value = previousVendorId
+        select.disabled = false
+        this.toast(`Could not assign this machine: ${(error as Error).message}`, 'error')
+      }
+    }))
+    document.querySelector<HTMLInputElement>('#account-search')?.addEventListener('input', event => {
+      this.adminSearch = (event.currentTarget as HTMLInputElement).value
+      const query = this.adminSearch.trim().toLowerCase()
+      let matches = 0
+      document.querySelectorAll<HTMLElement>('[data-account-row]').forEach(row => {
+        row.hidden = !row.dataset.search?.includes(query)
+        if (!row.hidden) matches += 1
+      })
+      const empty = document.querySelector<HTMLElement>('#account-search-empty')
+      if (empty) empty.hidden = !query || matches > 0
+    })
     document.querySelectorAll<HTMLElement>('[data-archive-product]').forEach(node => node.addEventListener('click', () => void this.archiveProduct(node.dataset.archiveProduct!)))
     document.querySelectorAll<HTMLElement>('[data-resolve]').forEach(node => node.addEventListener('click', () => void this.resolveAlert(node.dataset.resolve!)))
     document.querySelectorAll<HTMLElement>('[data-restock]').forEach(node => node.addEventListener('click', () => { const row = this.inventory.find(item => item._id === node.dataset.restock); if (row) void this.restock(row, Number(node.dataset.quantity) || 1) }))
     document.querySelectorAll<HTMLElement>('[data-machine-status]').forEach(node => node.addEventListener('click', () => void this.toggleMachine(node.dataset.machineStatus!, node.dataset.status!)))
     document.querySelectorAll<HTMLElement>('[data-jump]').forEach(node => node.addEventListener('click', () => document.getElementById(node.dataset.jump!)?.scrollIntoView({ behavior: 'smooth' })))
+    document.querySelectorAll<HTMLElement>('[data-sales-range]').forEach(node => node.addEventListener('click', () => {
+      this.salesRange = node.dataset.salesRange === '30' ? 30 : 7
+      this.render()
+    }))
   }
 
   private async toggleFavorite(productId: string) {
@@ -908,8 +1515,15 @@ class VendSmartApp {
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); document.querySelector<HTMLInputElement>('#product-search')?.focus() }
   }
 
-  private async handleAction(action: string) {
+  private async handleAction(action: string, trigger?: HTMLElement) {
     if (action === 'account') return this.user ? this.openAccountMenu() : this.openAuth('login')
+    if (action === 'suggestions') {
+      this.view = 'suggestions'
+      location.hash = 'suggestions'
+      this.render()
+      return
+    }
+    if (action === 'request-operator') return this.requestOperatorAccess(trigger instanceof HTMLButtonElement ? trigger : undefined)
     if (action === 'orders') { this.view = 'orders'; location.hash = 'orders'; this.render(); return }
     if (action === 'cart') return this.openCart()
     if (action === 'start-checkout') return this.startCheckout()
@@ -924,24 +1538,98 @@ class VendSmartApp {
     if (action === 'clear-prompt') { this.prompt = ''; this.recommendations = []; this.render(); return }
     if (action === 'locate-machines') { await this.locateMachines(); return }
     if (action === 'toggle-live-route') { if (this.pickupWatchId === null) this.startPickupTracking(); else this.stopRouteWatch(); return }
-    if (action === 'refresh') { await this.load(); this.toast('Operations data refreshed.', 'success') }
+    if (action === 'refresh') { await this.load(); this.toast(this.view === 'admin-audit' ? 'Audit log refreshed.' : this.view.startsWith('admin-') ? 'Admin data refreshed.' : this.view === 'accounts' ? 'Account list refreshed.' : 'Operations data refreshed.', 'success') }
     if (action === 'inventory-editor') this.openInventoryEditor()
     if (action === 'machine-editor') this.openMachineEditor()
     if (action === 'product-editor') this.openProductEditor()
   }
 
+  private async setAccountBan(id: string, currentlyBanned: boolean) {
+    if (this.user?.role !== 'ADMIN') return this.toast('Only administrators can change account access.', 'error')
+    const account = this.adminUsers.find(row => row._id === id)
+    if (!account || account.role === 'ADMIN') return this.toast('This account cannot be changed.', 'error')
+    const banned = !currentlyBanned
+    if (banned && !window.confirm(`Ban ${account.name}? They will lose access to their customer or operator account.`)) return
+    try {
+      await this.request(`/users/${id}/ban`, { method: 'PATCH', body: JSON.stringify({ banned }) })
+      this.adminUsers = this.adminUsers.map(row => row._id === id ? { ...row, banned, bannedAt: banned ? new Date().toISOString() : null } : row)
+      this.render()
+      this.toast(banned ? `${account.name} has been banned.` : `${account.name}'s access has been restored.`, 'success')
+    } catch (error) {
+      this.toast((error as Error).message, 'error')
+    }
+  }
+
+  private async setAccountRole(id: string, role: 'CUSTOMER' | 'OPERATOR') {
+    if (this.user?.role !== 'ADMIN') return this.toast('Only administrators can change account roles.', 'error')
+    const account = this.adminUsers.find(row => row._id === id)
+    if (!account || account.role === 'ADMIN') return this.toast('This account role cannot be changed.', 'error')
+    if (account.banned && role === 'OPERATOR') return this.toast('Restore this account before making it an operator.', 'error')
+    const action = role === 'OPERATOR' ? 'make an operator' : 'change to a customer'
+    if (!window.confirm(`${role === 'OPERATOR' ? `Make ${account.name} an operator?` : `Change ${account.name} to a customer?`} ${role === 'OPERATOR' ? 'You can then assign vending machines to this account.' : 'This account must have no assigned machines.'}`)) return
+    try {
+      const updated = await this.request<Account>(`/users/${id}/role`, { method: 'PATCH', body: JSON.stringify({ role }) })
+      this.adminUsers = this.adminUsers.map(row => row._id === id ? updated : row)
+      this.render()
+      this.toast(role === 'OPERATOR' ? `${account.name} is now an operator. Assign machines in the Machines section; they must sign out and back in to access operations.` : `${account.name} is now a customer.`, 'success')
+    } catch (error) {
+      this.toast(`Could not ${action}: ${(error as Error).message}`, 'error')
+    }
+  }
+
+  private async reviewOperatorRequest(id: string, approved: boolean) {
+    if (this.user?.role !== 'ADMIN') return this.toast('Only administrators can review operator requests.', 'error')
+    const account = this.adminUsers.find(row => row._id === id && row.operatorRequestStatus === 'PENDING')
+    if (!account) return this.toast('This operator request is no longer pending. Refresh and try again.', 'error')
+    const decision = approved ? 'approve' : 'decline'
+    if (!window.confirm(`${approved ? 'Approve' : 'Decline'} ${account.name}'s request for operator access?`)) return
+    try {
+      const updated = await this.request<Account>(`/users/${id}/operator-request`, { method: 'PATCH', body: JSON.stringify({ approved }) })
+      this.adminUsers = this.adminUsers.map(row => row._id === id ? updated : row)
+      this.render()
+      this.toast(approved ? `${account.name} is now an operator. They can sign out and back in, then add machines.` : `${account.name}'s operator request was declined.`, 'success')
+    } catch (error) {
+      this.toast(`Could not ${decision} the operator request: ${(error as Error).message}`, 'error')
+    }
+  }
+
   private openAccountMenu() {
     const root = document.querySelector<HTMLDivElement>('#modal-root')!
-    root.innerHTML = `<div class="modal-backdrop" data-dismiss><section class="modal-card small-modal" role="dialog" aria-modal="true" aria-label="Account settings"><button class="modal-close" data-dismiss aria-label="Close">${icon('close')}</button><div class="account-modal-avatar">${initials(this.user!.name)}</div><h2>${escapeHtml(this.user!.name)}</h2><p>${escapeHtml(this.user!.email)} · ${this.user!.role.toLowerCase()}</p>${this.user!.role !== 'CUSTOMER' ? `<button class="button-secondary modal-action" data-action="switch-ops">${icon('chart', 16)} Open operations overview</button>` : ''}<button class="button-secondary modal-action logout-button" data-action="logout">${icon('logout', 16)} Sign out</button></section></div>`
+    const requestStatus = this.user!.operatorRequestStatus || 'NONE'
+    const operatorRequestAction = this.user!.role !== 'CUSTOMER' ? '' : requestStatus === 'PENDING'
+      ? `<div class="operator-request-status pending">${icon('clock', 15)} Operator request pending administrator review.</div>`
+      : requestStatus === 'APPROVED'
+        ? `<div class="operator-request-status approved">${icon('check', 15)} Approved. Sign out and back in to activate your operator dashboard.</div>`
+        : requestStatus === 'REJECTED'
+          ? `<div class="operator-request-status rejected">Your previous request was declined. You can submit a new request.</div><button class="button-secondary modal-action" data-action="request-operator">${icon('settings', 16)} Request operator access</button>`
+          : `<button class="button-secondary modal-action" data-action="request-operator">${icon('settings', 16)} Request operator access</button>`
+    root.innerHTML = `<div class="modal-backdrop" data-dismiss><section class="modal-card small-modal" role="dialog" aria-modal="true" aria-label="Account settings"><button class="modal-close" data-dismiss aria-label="Close">${icon('close')}</button><div class="account-modal-avatar">${initials(this.user!.name)}</div><h2>${escapeHtml(this.user!.name)}</h2><p>${escapeHtml(this.user!.email)} · ${this.user!.role.toLowerCase()}</p>${operatorRequestAction}${this.user!.role !== 'CUSTOMER' ? `<button class="button-secondary modal-action" data-action="switch-ops">${icon('chart', 16)} Open operations overview</button>` : ''}<button class="button-secondary modal-action logout-button" data-action="logout">${icon('logout', 16)} Sign out</button></section></div>`
     root.querySelectorAll<HTMLElement>('[data-dismiss]').forEach(node => node.addEventListener('click', event => { if (event.target === node || node.classList.contains('modal-close')) root.innerHTML = '' }))
     root.querySelector('[data-action="logout"]')?.addEventListener('click', () => { this.setUser(null); this.toast('You have signed out.', 'success'); root.innerHTML = '' })
     root.querySelector('[data-action="switch-ops"]')?.addEventListener('click', () => { this.view = 'operations'; location.hash = 'operations'; root.innerHTML = ''; this.render() })
+    root.querySelector<HTMLButtonElement>('[data-action="request-operator"]')?.addEventListener('click', event => void this.requestOperatorAccess(event.currentTarget as HTMLButtonElement))
+  }
+
+  private async requestOperatorAccess(button?: HTMLButtonElement) {
+    if (!this.user || this.user.role !== 'CUSTOMER') return
+    if (button) { button.disabled = true; button.textContent = 'Submitting…' }
+    try {
+      const result = await this.request<{ operatorRequestStatus: 'PENDING'; operatorRequestedAt: string }>('/session/operator-request', { method: 'POST' })
+      this.user = { ...this.user, operatorRequestStatus: result.operatorRequestStatus }
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(this.user))
+      this.render()
+      this.openAccountMenu()
+      this.toast('Operator access request sent to an administrator.', 'success')
+    } catch (error) {
+      if (button) { button.disabled = false; button.textContent = 'Request operator access' }
+      this.toast(`Could not submit your request: ${(error as Error).message}`, 'error')
+    }
   }
 
   private openAuth(mode: 'login' | 'register' = 'login') {
     const root = document.querySelector<HTMLDivElement>('#modal-root')!
     const isRegister = mode === 'register'
-    root.innerHTML = `<div class="modal-backdrop" data-dismiss><section class="modal-card auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title"><button class="modal-close" data-dismiss aria-label="Close">${icon('close')}</button><div class="auth-mark">${icon('coffee', 22)}</div><div class="eyebrow"><span class="eyebrow-line"></span> ${isRegister ? 'MAKE YOURSELF AT HOME' : 'YOUR NEXT BREAK IS CLOSE'}</div><h2 id="auth-title">${isRegister ? 'A good thing starts here.' : 'Welcome back.'}</h2><p>${isRegister ? 'Create an account to save your orders and pickup codes.' : 'Sign in to see your orders and pick up right where you left off.'}</p><form id="auth-form" class="form-stack">${isRegister ? `<label>Your name<input name="name" autocomplete="name" placeholder="Alex Morgan" required minlength="2"></label>` : ''}<label>Email address<input name="email" type="email" autocomplete="email" placeholder="you@example.com" required></label><label>Password<input name="password" type="password" autocomplete="${isRegister ? 'new-password' : 'current-password'}" placeholder="At least 8 characters" required minlength="8"></label><div class="form-error" id="auth-error" role="alert"></div><button class="button-primary form-submit" type="submit">${isRegister ? 'Create my account' : 'Sign in'} ${icon('arrow', 16)}</button></form><div class="auth-switch">${isRegister ? 'Already have an account?' : 'New around here?'} <button data-auth-switch>${isRegister ? 'Sign in' : 'Create an account'}</button></div><div class="auth-security">${icon('settings', 14)} New signups start with a customer account. Operator access is managed by an administrator.</div></section></div>`
+    root.innerHTML = `<div class="modal-backdrop" data-dismiss><section class="modal-card auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title"><button class="modal-close" data-dismiss aria-label="Close">${icon('close')}</button><div class="auth-mark">${icon('coffee', 22)}</div><div class="eyebrow"><span class="eyebrow-line"></span> ${isRegister ? 'MAKE YOURSELF AT HOME' : 'YOUR NEXT BREAK IS CLOSE'}</div><h2 id="auth-title">${isRegister ? 'A good thing starts here.' : 'Welcome back.'}</h2><p>${isRegister ? 'Create an account to save your orders and pickup codes.' : 'Sign in to see your orders and pick up right where you left off.'}</p><form id="auth-form" class="form-stack">${isRegister ? `<label>Your name<input name="name" autocomplete="name" placeholder="Alex Morgan" required minlength="2"></label>` : ''}<label>Email address<input name="email" type="email" autocomplete="email" placeholder="you@example.com" required></label><label>Password<input name="password" type="password" autocomplete="${isRegister ? 'new-password' : 'current-password'}" placeholder="At least 8 characters" required minlength="8"></label><div class="form-error" id="auth-error" role="alert"></div><button class="button-primary form-submit" type="submit">${isRegister ? 'Create my account' : 'Sign in'} ${icon('arrow', 16)}</button></form><div class="auth-switch">${isRegister ? 'Already have an account?' : 'New around here?'} <button data-auth-switch>${isRegister ? 'Sign in' : 'Create an account'}</button></div><div class="auth-security">${icon('settings', 14)} New signups start as customers. Request operator access from your account; an administrator must approve it.</div></section></div>`
     root.querySelectorAll<HTMLElement>('[data-dismiss]').forEach(node => node.addEventListener('click', event => { if (event.target === node || node.classList.contains('modal-close')) root.innerHTML = '' }))
     root.querySelector('[data-auth-switch]')?.addEventListener('click', () => this.openAuth(isRegister ? 'login' : 'register'))
     root.querySelector<HTMLFormElement>('#auth-form')?.addEventListener('submit', event => { event.preventDefault(); void this.submitAuth(new FormData(event.currentTarget as HTMLFormElement), isRegister) })
@@ -953,7 +1641,7 @@ class VendSmartApp {
     const errorNode = document.querySelector<HTMLDivElement>('#auth-error')!
     submit.disabled = true; submit.innerHTML = 'One moment…'
     try {
-      const data = await this.request<User>(`/auth/${register ? 'register' : 'login'}`, { method: 'POST', body: JSON.stringify({ name: form.get('name'), email: form.get('email'), password: form.get('password') }) })
+      const data = await this.request<User>(`/session/${register ? 'register' : 'login'}`, { method: 'POST', body: JSON.stringify({ name: form.get('name'), email: form.get('email'), password: form.get('password') }) })
       this.setUser(data); document.querySelector('#modal-root')!.innerHTML = ''; this.toast(`Welcome${register ? '' : ' back'}, ${data.name.split(' ')[0]}.`, 'success')
     } catch (error) { errorNode.textContent = (error as Error).message; submit.disabled = false; submit.innerHTML = `${register ? 'Create my account' : 'Sign in'} ${icon('arrow', 16)}` }
   }
@@ -966,6 +1654,14 @@ class VendSmartApp {
     const subtotal = rows.reduce((sum, product) => sum + product.price * (this.cart.get(product._id) || 0), 0)
     root.innerHTML = `<div class="modal-backdrop" data-dismiss><section class="modal-card cart-modal" role="dialog" aria-modal="true" aria-label="Your bag"><button class="modal-close" data-dismiss aria-label="Close">${icon('close')}</button><div class="eyebrow"><span class="eyebrow-line"></span> A GOOD BREAK IS CLOSE</div><h2>Your little <em>pick-me-up.</em></h2><p class="cart-machine">${icon('pin', 15)} ${escapeHtml(this.machines.find(machine => machine._id === this.selectedMachine)?.name || 'Pickup machine')}</p><div class="cart-lines">${rows.map(product => `<div class="cart-line"><div class="cart-item-art visual-${rows.indexOf(product) % 6}">${imageFor(product)}</div><div class="cart-item-copy"><strong>${escapeHtml(product.name)}</strong><span>${this.money(product.price)} each</span></div><div class="quantity-control"><button data-quantity="${product._id}" data-delta="-1" aria-label="Remove one ${escapeHtml(product.name)}">${icon('minus', 14)}</button><strong>${this.cart.get(product._id)}</strong><button data-quantity="${product._id}" data-delta="1" aria-label="Add one ${escapeHtml(product.name)}">${icon('plus', 14)}</button></div><strong class="line-total">${this.money(product.price * (this.cart.get(product._id) || 0))}</strong></div>`).join('')}</div><div class="cart-total"><span>Subtotal <small>· pickup is free</small></span><strong>${this.money(subtotal)}</strong></div><div class="demo-payment-note">${icon('card', 15)} Pay by card or UPI on the next step — this demo simulates the payment and charges nothing.</div><button class="button-primary checkout-button" data-action="start-checkout">Continue to payment ${icon('arrow', 16)}</button><span class="cart-footnote">Your picks are held for 15 minutes after payment.</span></section></div>`
     root.querySelectorAll<HTMLElement>('[data-dismiss]').forEach(node => node.addEventListener('click', event => { if (event.target === node || node.classList.contains('modal-close')) root.innerHTML = '' }))
+    root.querySelectorAll<HTMLElement>('.cart-line').forEach((node, index) => {
+      const product = rows[index]
+      if (!product) return
+      const unit = node.querySelector<HTMLElement>('.cart-item-copy span')
+      if (unit) unit.innerHTML = `${this.priceMarkup(product)} each · ${this.expirationLabel(product)}`
+      const total = node.querySelector<HTMLElement>('.line-total')
+      if (total) total.textContent = this.money(product.price * (this.cart.get(product._id) || 0))
+    })
     root.querySelectorAll<HTMLElement>('[data-quantity]').forEach(node => node.addEventListener('click', () => { const id = node.dataset.quantity!; const count = (this.cart.get(id) || 0) + Number(node.dataset.delta); if (count > 0) this.cart.set(id, count); else this.cart.delete(id); this.openCart() }))
     root.querySelector('[data-action="start-checkout"]')?.addEventListener('click', () => this.startCheckout())
   }
@@ -1053,11 +1749,13 @@ class VendSmartApp {
     this.toast(`${message}${suffix}`, short ? 'info' : 'error')
   }
 
-  private openInventoryEditor(id?: string) {
+  private openInventoryEditor(id?: string, machineId?: string) {
     const root = document.querySelector<HTMLDivElement>('#modal-root')!
     const row = id ? this.inventory.find(item => item._id === id) : undefined
     if (id && !row) return this.toast('Inventory row could not be found. Refresh and try again.', 'error')
-    root.innerHTML = `<div class="modal-backdrop" data-dismiss><section class="modal-card inventory-modal" role="dialog" aria-modal="true" aria-labelledby="inventory-title"><button class="modal-close" data-dismiss aria-label="Close">${icon('close')}</button><div class="eyebrow"><span class="eyebrow-line"></span> STOCK CONTROL</div><h2 id="inventory-title">${row ? 'Adjust inventory.' : 'Add machine stock.'}</h2><p>Available stock is calculated after active reservations.</p><form id="inventory-form" class="form-stack">${row ? '' : `<label>Machine<select name="machineId" required>${this.machines.map(machine => `<option value="${machine._id}">${escapeHtml(machine.name)}</option>`).join('')}</select></label><label>Product<select name="productId" required>${this.catalogProducts.map(product => `<option value="${product._id}">${escapeHtml(product.name)} · ${this.money(product.price)}</option>`).join('')}</select></label>`}<label>Total quantity<input name="quantity" type="number" min="${row?.reserved || 0}" step="1" value="${row?.quantity ?? 0}" required></label><label>Low-stock alert threshold<input name="lowStockThreshold" type="number" min="0" step="1" value="${row?.lowStockThreshold ?? 5}" required></label><label>Machine slot<input name="slot" maxlength="20" value="${escapeHtml(row?.slot || '')}" placeholder="e.g. A1"></label><button class="button-primary form-submit" type="submit">Save stock levels ${icon('check', 16)}</button>${row && row.reserved === 0 ? '<button class="button-secondary delete-stock" type="button">Remove inventory row</button>' : ''}</form></section></div>`
+    root.innerHTML = `<div class="modal-backdrop" data-dismiss><section class="modal-card inventory-modal" role="dialog" aria-modal="true" aria-labelledby="inventory-title"><button class="modal-close" data-dismiss aria-label="Close">${icon('close')}</button><div class="eyebrow"><span class="eyebrow-line"></span> STOCK CONTROL</div><h2 id="inventory-title">${row ? 'Adjust inventory.' : 'Add machine stock.'}</h2><p>Available stock is calculated after active reservations.</p><form id="inventory-form" class="form-stack">${row ? '' : `<label>Machine<select name="machineId" required>${this.machines.map(machine => `<option value="${machine._id}" ${machine._id === machineId ? 'selected' : ''}>${escapeHtml(machine.name)}</option>`).join('')}</select></label><label>Product<select name="productId" required>${this.catalogProducts.map(product => `<option value="${product._id}">${escapeHtml(product.name)} · ${this.money(product.price)}</option>`).join('')}</select></label>`}<label>Total quantity<input name="quantity" type="number" min="${row?.reserved || 0}" step="1" value="${row?.quantity ?? 0}" required></label><label>Low-stock alert threshold<input name="lowStockThreshold" type="number" min="0" step="1" value="${row?.lowStockThreshold ?? 5}" required></label><label>Machine slot<input name="slot" maxlength="20" value="${escapeHtml(row?.slot || '')}" placeholder="e.g. A1"></label><button class="button-primary form-submit" type="submit">Save stock levels ${icon('check', 16)}</button>${row && row.reserved === 0 ? '<button class="button-secondary delete-stock" type="button">Remove inventory row</button>' : ''}</form></section></div>`
+    const inventoryForm = root.querySelector<HTMLFormElement>('#inventory-form')
+    inventoryForm?.querySelector<HTMLButtonElement>('button[type="submit"]')?.insertAdjacentHTML('beforebegin', `<label>Expiration date<input name="expirationDate" type="date" value="${row?.expirationDate?.slice(0, 10) || ''}" ${row ? '' : 'required'}></label><small class="field-hint">Existing stock without a date stays available until you record one. This date applies to every unit on this machine/product shelf.</small><label>Near-expiry discount (%)<input name="discountPercent" type="number" min="0" max="90" step="1" value="${row?.discountPercent || 0}" required></label><small class="field-hint">Optional. Discounts are active only during the final 7 days before expiry.</small>`)
     root.querySelectorAll<HTMLElement>('[data-dismiss]').forEach(node => node.addEventListener('click', event => { if (event.target === node || node.classList.contains('modal-close')) root.innerHTML = '' }))
     root.querySelector<HTMLFormElement>('#inventory-form')?.addEventListener('submit', event => { event.preventDefault(); void this.saveInventory(new FormData(event.currentTarget as HTMLFormElement), row) })
     root.querySelector('.delete-stock')?.addEventListener('click', async () => {
@@ -1067,17 +1765,19 @@ class VendSmartApp {
     })
   }
 
-  private openProductEditor(id?: string) {
+  private openProductEditor(id?: string, suggestionId?: string) {
     if (!this.user || !['ADMIN', 'OPERATOR'].includes(this.user.role)) return this.toast('Operations access is required to manage products.', 'error')
     const root = document.querySelector<HTMLDivElement>('#modal-root')!
     const product = id ? this.catalogProducts.find(row => row._id === id) : undefined
     if (id && !product) return this.toast('Product could not be found. Refresh and try again.', 'error')
-    root.innerHTML = `<div class="modal-backdrop" data-dismiss><section class="modal-card inventory-modal" role="dialog" aria-modal="true" aria-labelledby="product-title"><button class="modal-close" data-dismiss aria-label="Close">${icon('close')}</button><div class="eyebrow"><span class="eyebrow-line"></span> CATALOG MANAGEMENT</div><h2 id="product-title">${product ? 'Edit product.' : 'Add a product.'}</h2><p>Changes update the shared catalog and customer storefront.</p><form id="product-form" class="form-stack"><label>Product name<input name="name" maxlength="120" value="${escapeHtml(product?.name || '')}" required></label><label>SKU<input name="sku" pattern="[A-Za-z0-9_-]{2,40}" maxlength="40" value="${escapeHtml(product?.sku || '')}" ${product ? 'disabled' : 'required'}></label><label>Category<input name="category" maxlength="80" value="${escapeHtml(product?.category || '')}" required></label><label>Price (USD)<input name="price" type="number" min="0" max="100000" step="0.01" value="${product?.price ?? ''}" required></label><label>Description<input name="description" maxlength="500" value="${escapeHtml(product?.description || '')}"></label><label>Image URL or emoji<input name="image" maxlength="2048" value="${escapeHtml(product?.image || '')}"></label><label>Tags (comma separated)<input name="tags" maxlength="660" value="${escapeHtml(product?.tags?.join(', ') || '')}" placeholder="vegan, protein"></label><button class="button-primary form-submit" type="submit">Save product ${icon('check', 16)}</button></form></section></div>`
+    const suggestion = suggestionId ? this.suggestions.find(row => row._id === suggestionId) : undefined
+    if (suggestionId && !suggestion) return this.toast('Suggestion could not be found. Refresh and try again.', 'error')
+    root.innerHTML = `<div class="modal-backdrop" data-dismiss><section class="modal-card inventory-modal" role="dialog" aria-modal="true" aria-labelledby="product-title"><button class="modal-close" data-dismiss aria-label="Close">${icon('close')}</button><div class="eyebrow"><span class="eyebrow-line"></span> CATALOG MANAGEMENT</div><h2 id="product-title">${product ? 'Edit product.' : suggestion ? 'Add requested item.' : 'Add a product.'}</h2><p>${suggestion ? `Create a catalog product for “${escapeHtml(suggestion.name)}”. Saving also closes the suggestion.` : 'Changes update the shared catalog and customer storefront.'}</p><form id="product-form" class="form-stack"><label>Product name<input name="name" maxlength="120" value="${escapeHtml(product?.name || suggestion?.name || '')}" required></label><label>SKU<input name="sku" pattern="[A-Za-z0-9_-]{2,40}" maxlength="40" value="${escapeHtml(product?.sku || '')}" ${product ? 'disabled' : 'required'}></label><label>Category<input name="category" maxlength="80" value="${escapeHtml(product?.category || suggestion?.category || '')}" required></label><label>Price (USD)<input name="price" type="number" min="0" max="100000" step="0.01" value="${product?.price ?? ''}" required></label><label>Description<input name="description" maxlength="500" value="${escapeHtml(product?.description || suggestion?.details || '')}"></label><label>Image URL or emoji<input name="image" maxlength="2048" value="${escapeHtml(product?.image || '')}"></label><label>Tags (comma separated)<input name="tags" maxlength="660" value="${escapeHtml(product?.tags?.join(', ') || '')}" placeholder="vegan, protein"></label><button class="button-primary form-submit" type="submit">${suggestion ? 'Create product & close suggestion' : 'Save product'} ${icon('check', 16)}</button></form></section></div>`
     root.querySelectorAll<HTMLElement>('[data-dismiss]').forEach(node => node.addEventListener('click', event => { if (event.target === node || node.classList.contains('modal-close')) root.innerHTML = '' }))
-    root.querySelector<HTMLFormElement>('#product-form')?.addEventListener('submit', event => { event.preventDefault(); void this.saveProduct(new FormData(event.currentTarget as HTMLFormElement), product) })
+    root.querySelector<HTMLFormElement>('#product-form')?.addEventListener('submit', event => { event.preventDefault(); void this.saveProduct(new FormData(event.currentTarget as HTMLFormElement), product, suggestionId) })
   }
 
-  private async saveProduct(form: FormData, product?: Product) {
+  private async saveProduct(form: FormData, product?: Product, suggestionId?: string) {
     const body: Record<string, unknown> = {
       name: String(form.get('name') || '').trim(),
       category: String(form.get('category') || '').trim(),
@@ -1088,10 +1788,20 @@ class VendSmartApp {
     }
     if (!product) body.sku = String(form.get('sku') || '').trim()
     try {
-      await this.request(product ? `/products/${product._id}` : '/products', { method: product ? 'PATCH' : 'POST', body: JSON.stringify(body) })
+      const saved = await this.request<Product>(product ? `/products/${product._id}` : '/products', { method: product ? 'PATCH' : 'POST', body: JSON.stringify(body) })
+      if (suggestionId) {
+        try {
+          await this.request(`/suggestions/${suggestionId}/status`, { method: 'PATCH', body: JSON.stringify({ status: 'ADDED', productId: saved._id }) })
+        } catch (error) {
+          document.querySelector('#modal-root')!.innerHTML = ''
+          await this.load()
+          this.toast(`Product created, but the suggestion is still open: ${(error as Error).message}`, 'error')
+          return
+        }
+      }
       document.querySelector('#modal-root')!.innerHTML = ''
       await this.load()
-      this.toast(product ? 'Product updated.' : 'Product created.', 'success')
+      this.toast(suggestionId ? 'Product created and suggestion marked as added.' : product ? 'Product updated.' : 'Product created.', 'success')
     } catch (error) { this.toast((error as Error).message, 'error') }
   }
 
@@ -1106,19 +1816,22 @@ class VendSmartApp {
   }
 
   private openMachineEditor(id?: string) {
-    if (this.user?.role !== 'ADMIN') return this.toast('Only administrators can manage machines.', 'error')
+    if (!['ADMIN', 'OPERATOR'].includes(this.user?.role || '') || (id && this.user?.role !== 'ADMIN')) return this.toast('Operators can add machines; only administrators can edit existing machines.', 'error')
     const root = document.querySelector<HTMLDivElement>('#modal-root')!
     const machine = id ? this.machines.find(row => row._id === id) : undefined
     if (id && !machine) return this.toast('Machine could not be found. Refresh and try again.', 'error')
     const latitude = machine?.location?.coordinates?.[1] ?? ''
     const longitude = machine?.location?.coordinates?.[0] ?? ''
-    root.innerHTML = `<div class="modal-backdrop" data-dismiss><section class="modal-card inventory-modal" role="dialog" aria-modal="true" aria-labelledby="machine-title"><button class="modal-close" data-dismiss aria-label="Close">${icon('close')}</button><div class="eyebrow"><span class="eyebrow-line"></span> LOCATION MANAGEMENT</div><h2 id="machine-title">${machine ? 'Edit machine.' : 'Add a machine.'}</h2><p>Coordinates use decimal degrees; the API uses longitude/latitude map coordinates.</p><form id="machine-form" class="form-stack"><label>Machine name<input name="name" maxlength="100" value="${escapeHtml(machine?.name || '')}" required></label>${machine ? '' : '<label>Machine code<input name="code" pattern="[A-Za-z0-9-]{3,30}" maxlength="30" required></label>'}<label>Street address<input name="address" maxlength="200" value="${escapeHtml(machine?.address || '')}" required></label><label>Description<input name="description" maxlength="500" value="${escapeHtml(machine?.description || '')}"></label><label>Latitude<input name="latitude" type="number" min="-90" max="90" step="any" value="${latitude}" required></label><label>Longitude<input name="longitude" type="number" min="-180" max="180" step="any" value="${longitude}" required></label><label>Capacity<input name="capacity" type="number" min="1" max="10000" value="${machine?.capacity || 60}" required></label><label>Status<select name="status"><option value="ONLINE" ${machine?.status === 'ONLINE' ? 'selected' : ''}>Online</option><option value="OFFLINE" ${machine?.status === 'OFFLINE' ? 'selected' : ''}>Offline</option><option value="MAINTENANCE" ${machine?.status === 'MAINTENANCE' ? 'selected' : ''}>Maintenance</option></select></label><button class="button-primary form-submit" type="submit">${machine ? 'Save machine' : 'Create machine'} ${icon('check', 16)}</button></form></section></div>`
+    const assignedVendor = typeof machine?.vendor === 'object' && machine.vendor ? machine.vendor._id : ''
+    const isAdmin = this.user?.role === 'ADMIN'
+    const operators = this.adminUsers.filter(account => account.role === 'OPERATOR' && !account.banned)
+    root.innerHTML = `<div class="modal-backdrop" data-dismiss><section class="modal-card inventory-modal" role="dialog" aria-modal="true" aria-labelledby="machine-title"><button class="modal-close" data-dismiss aria-label="Close">${icon('close')}</button><div class="eyebrow"><span class="eyebrow-line"></span> LOCATION MANAGEMENT</div><h2 id="machine-title">${machine ? 'Edit machine.' : 'Add a machine.'}</h2><p>Coordinates use decimal degrees; the API uses longitude/latitude map coordinates.${!isAdmin ? ' This machine will be assigned to your operator account.' : ''}</p><form id="machine-form" class="form-stack"><label>Machine name<input name="name" maxlength="100" value="${escapeHtml(machine?.name || '')}" required></label>${machine ? '' : '<label>Machine code<input name="code" pattern="[A-Za-z0-9-]{3,30}" maxlength="30" required></label>'}<label>Street address<input name="address" maxlength="200" value="${escapeHtml(machine?.address || '')}" required></label><label>Description<input name="description" maxlength="500" value="${escapeHtml(machine?.description || '')}"></label><label>Latitude<input name="latitude" type="number" min="-90" max="90" step="any" value="${latitude}" required></label><label>Longitude<input name="longitude" type="number" min="-180" max="180" step="any" value="${longitude}" required></label><label>Capacity<input name="capacity" type="number" min="1" max="10000" value="${machine?.capacity || 60}" required></label>${isAdmin ? `<label>Status<select name="status"><option value="ONLINE" ${machine?.status === 'ONLINE' ? 'selected' : ''}>Online</option><option value="OFFLINE" ${machine?.status === 'OFFLINE' ? 'selected' : ''}>Offline</option><option value="MAINTENANCE" ${machine?.status === 'MAINTENANCE' ? 'selected' : ''}>Maintenance</option></select></label><label>Assigned operator<select name="vendorId"><option value="">Unassigned</option>${operators.map(account => `<option value="${account._id}" ${account._id === assignedVendor ? 'selected' : ''}>${escapeHtml(account.name)} · ${escapeHtml(account.email)}</option>`).join('')}</select></label>` : ''}<button class="button-primary form-submit" type="submit">${machine ? 'Save machine' : 'Create machine'} ${icon('check', 16)}</button></form></section></div>`
     root.querySelectorAll<HTMLElement>('[data-dismiss]').forEach(node => node.addEventListener('click', event => { if (event.target === node || node.classList.contains('modal-close')) root.innerHTML = '' }))
     root.querySelector<HTMLFormElement>('#machine-form')?.addEventListener('submit', event => { event.preventDefault(); void this.saveMachine(new FormData(event.currentTarget as HTMLFormElement), machine) })
   }
 
   private async saveMachine(form: FormData, machine?: Machine) {
-    const payload = Object.fromEntries(['name', 'address', 'description', 'latitude', 'longitude', 'capacity', 'status'].map(key => [key, form.get(key)]))
+    const payload = Object.fromEntries(['name', 'address', 'description', 'latitude', 'longitude', 'capacity', 'status', 'vendorId'].map(key => [key, form.get(key)]))
     if (!machine) payload.code = form.get('code')
     try {
       await this.request(machine ? `/machines/${machine._id}` : '/machines', { method: machine ? 'PATCH' : 'POST', body: JSON.stringify(payload) })
@@ -1135,6 +1848,8 @@ class VendSmartApp {
       quantity: Number(form.get('quantity')),
       lowStockThreshold: Number(form.get('lowStockThreshold')),
       slot: String(form.get('slot') || ''),
+      expirationDate: String(form.get('expirationDate') || ''),
+      discountPercent: Number(form.get('discountPercent') || 0),
     }
     try {
       await this.request('/inventory', { method: 'PUT', body: JSON.stringify(payload) })
@@ -1149,7 +1864,10 @@ class VendSmartApp {
   }
 
   private async restock(row: InventoryRow, amount: number) {
-    try { await this.request('/inventory', { method: 'PUT', body: JSON.stringify({ machineId: row.machine._id, productId: row.product._id, quantity: row.quantity + amount, lowStockThreshold: row.lowStockThreshold }) }); await this.load(); this.toast(`${row.product.name} restocked by ${amount}.`, 'success') } catch (error) { this.toast((error as Error).message, 'error') }
+    const defaultExpiry = row.expirationDate?.slice(0, 10) || ''
+    const expirationDate = window.prompt(`Confirm the expiration date for ${row.product.name} stock. This shelf can only track one date.`, defaultExpiry)
+    if (expirationDate === null) return
+    try { await this.request('/inventory', { method: 'PUT', body: JSON.stringify({ machineId: row.machine._id, productId: row.product._id, quantity: row.quantity + amount, lowStockThreshold: row.lowStockThreshold, expirationDate }) }); await this.load(); this.toast(`${row.product.name} restocked by ${amount}.`, 'success') } catch (error) { this.toast((error as Error).message, 'error') }
   }
 
 

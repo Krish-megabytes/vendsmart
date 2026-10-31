@@ -31,7 +31,7 @@ app.get('/health', (req, res) => {
 });
 
 // Routes
-app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: 'Too many sign-in requests. Please wait and try again.' }), require('./routes/authRoutes'));
+app.use('/api/session', rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: 'Too many sign-in requests. Please wait and try again.' }), require('./routes/authRoutes'));
 app.use('/api/users', require('./routes/adminRoutes'));
 app.use('/api', require('./routes/vendingRoutes'));
 

@@ -33,6 +33,15 @@ const userSchema = new mongoose.Schema({
     index: true,
   },
   bannedAt: Date,
+  operatorRequestStatus: {
+    type: String,
+    enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'],
+    default: 'NONE',
+    index: true,
+  },
+  operatorRequestedAt: Date,
+  operatorReviewedAt: Date,
+  operatorReviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   preferences: {
     type: Map,
     of: mongoose.Schema.Types.Mixed,

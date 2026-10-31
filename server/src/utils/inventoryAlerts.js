@@ -1,6 +1,7 @@
 const Alert = require('../models/Alert');
 const Inventory = require('../models/Inventory');
 const Machine = require('../models/Machine');
+const { availableQuantity, isExpired } = require('./productExpiry');
 
 async function syncOperationalAlerts() {
   const [inventoryRows, machines] = await Promise.all([
@@ -11,9 +12,12 @@ async function syncOperationalAlerts() {
   const desired = [];
   for (const row of inventoryRows) {
     if (!row.machine || !row.product) continue;
-    const available = Math.max(0, row.quantity - row.reserved);
+    const available = availableQuantity(row);
     if (available === 0) {
-      desired.push({ type: 'OUT_OF_STOCK', severity: 'CRITICAL', message: `${row.product.name} is out of stock at ${row.machine.name}.`, machine: row.machine._id, product: row.product._id, inventory: row._id });
+      const message = isExpired(row.expirationDate)
+        ? `${row.product.name} has expired and is blocked at ${row.machine.name}.`
+        : `${row.product.name} is out of stock at ${row.machine.name}.`;
+      desired.push({ type: 'OUT_OF_STOCK', severity: 'CRITICAL', message, machine: row.machine._id, product: row.product._id, inventory: row._id });
     } else if (available <= row.lowStockThreshold) {
       desired.push({ type: 'LOW_STOCK', severity: 'WARNING', message: `${row.product.name} is running low at ${row.machine.name} (${available} left).`, machine: row.machine._id, product: row.product._id, inventory: row._id });
     }

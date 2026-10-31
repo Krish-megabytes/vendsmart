@@ -10,6 +10,8 @@ const reservationSchema = new mongoose.Schema({
     sku: { type: String, required: true },
     quantity: { type: Number, required: true, min: 1 },
     unitPrice: { type: Number, required: true, min: 0 },
+    discountPercent: { type: Number, min: 0, max: 90 },
+    expirationDate: Date,
   }],
   total: { type: Number, required: true, min: 0 },
   status: { type: String, enum: ['PENDING', 'PAID', 'DISPENSED', 'CANCELLED', 'EXPIRED'], default: 'PENDING', index: true },

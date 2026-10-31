@@ -8,10 +8,11 @@ Protected routes use `Authorization: Bearer <JWT>`. Public signup always creates
 
 | Method | Route | Access | Description |
 | --- | --- | --- | --- |
-| POST | `/auth/register` | Public | Create a customer. Body: `{name,email,password,phone?}`. |
-| POST | `/auth/login` | Public | Login. Body: `{email,password}`. |
-| GET | `/auth/me` | Signed in | Get the current profile. |
-| POST | `/auth/logout` | Signed in | Client-side JWT logout acknowledgement. |
+| POST | `/session/register` | Public | Create a customer. Body: `{name,email,password,phone?}`. |
+| POST | `/session/login` | Public | Login. Body: `{email,password}`. |
+| POST | `/session/operator-request` | Signed-in customer | Request operator access. The administrator reviews the request; approved accounts must sign in again to activate operator access. |
+| GET | `/session/me` | Signed in | Get the current profile. |
+| POST | `/session/logout` | Signed in | Client-side JWT logout acknowledgement. |
 
 ## Machines and catalog
 
@@ -19,14 +20,23 @@ Protected routes use `Authorization: Bearer <JWT>`. Public signup always creates
 | --- | --- | --- | --- |
 | GET | `/machines?lat=30.7695&lng=76.575&radius=25000` | Public | List machines, optionally nearest-first within a radius in meters. |
 | GET | `/machines/:id` | Public | Machine details. |
-| POST | `/machines` | Admin | Create a machine. Body includes `name,code,address,latitude,longitude`; optional `description,capacity,vendorId`. |
-| PATCH | `/machines/:id` | Operator | Update `name,description,address,status,capacity` or coordinates. Status is `ONLINE`, `OFFLINE`, or `MAINTENANCE`; coordinates are checked against valid latitude/longitude ranges. Only an admin can change `vendorId` (an `OPERATOR` account, or `null` to unassign). |
+| POST | `/machines` | Operator or Admin | Create a machine. Body includes `name,code,address,latitude,longitude`; optional `description,capacity,vendorId`. Operators automatically own machines they create; admins may assign an active operator. |
+| PATCH | `/machines/:id` | Operator or Admin | Update `name,description,address,status,capacity` or coordinates. Status is `ONLINE`, `OFFLINE`, or `MAINTENANCE`; coordinates are checked against valid latitude/longitude ranges. Operators can update only their own machines. Only an admin can change `vendorId` (an `OPERATOR` account, or `null` to unassign). |
 | DELETE | `/machines/:id` | Admin | Remove a vendor location, its inventory and its alerts. Rejected while the machine has `PENDING` or `PAID` orders; past orders stay in history. |
-| GET | `/products?machineId=...&search=...&category=...` | Public | Search the active catalog and optionally include available stock for a machine. |
-| GET | `/recommendations?prompt=vegan+snack+under+4&machineId=...` | Public | Rank available products using local keyword, category, diet, and price matching. No LLM/API key is sent or required. |
+| GET | `/products?machineId=...&search=...&category=...` | Public | Search the active catalog and optionally include available stock, expiration date, and any active near-expiry discount for a machine. Expired stock is returned as unavailable. |
+| GET | `/recommendations?prompt=vegan+snack+under+4&machineId=...` | Public | Rank available products using local keyword, category, diet, and price matching; machine-specific results use active discounted prices and omit expired stock. No LLM/API key is sent or required. |
 | POST | `/products` | Operator | Create product with `name,sku,category,price`; optional `description,image,tags`. |
 | PATCH | `/products/:id` | Operator | Update product fields. Product edits are validated; archiving (`active:false`) is rejected until all on-hand inventory is removed. |
 | DELETE | `/products/:id` | Admin | Soft-delete a product only after all on-hand inventory is removed, including stock currently held for reservations. |
+
+## Product suggestions
+
+| Method | Route | Access | Description |
+| --- | --- | --- | --- |
+| GET | `/suggestions` | Public (optional sign-in) | List up to 100 recent open suggestions and items marked as added, ordered by vote count. Signed-in customers receive their own `voted` state; submitter identity is not exposed. Operators can request only open suggestions with `?status=OPEN`. |
+| POST | `/suggestions` | Customer | Submit `{name,category?,details?}`. Names are trimmed and case-insensitive duplicate open suggestions receive the customer's vote instead of creating another entry. |
+| POST | `/suggestions/:id/vote` | Customer | Toggle the customer's vote on an open suggestion; each account can have at most one vote. |
+| PATCH | `/suggestions/:id/status` | Operator or Admin | Mark an open suggestion `DECLINED`, or `ADDED` with `{status:"ADDED",productId}` referencing an active catalog product. Create the catalog product first; the dashboard product form can be opened prefilled from a suggestion. |
 
 ## Favorites
 
@@ -41,7 +51,7 @@ Protected routes use `Authorization: Bearer <JWT>`. Public signup always creates
 | Method | Route | Access | Description |
 | --- | --- | --- | --- |
 | GET | `/inventory?machineId=...&productId=...` | Operator | List inventory with machine/product details. An operator only receives rows for machines assigned to their vendor account; an admin sees every machine. |
-| PUT | `/inventory` | Operator | Create or update a stock row: `{machineId,productId,quantity,lowStockThreshold?,slot?}`. Reserved units cannot be removed, and an operator can only stock their own machines. |
+| PUT | `/inventory` | Operator | Create or update a machine/product stock row: `{machineId,productId,quantity,lowStockThreshold?,slot?,expirationDate?,discountPercent?}`. New stock requires an `expirationDate` (`YYYY-MM-DD`); an increase to an existing shelf must reconfirm it. Existing undated stock remains sellable until an operator records its date. A row represents one expiry date for all its units; remove/sell the current stock before adding a different-expiry batch. Expired stock is automatically unavailable and cannot be reserved or dispensed. Operators may set a 0–90% discount only when expiry is within 7 days; it is applied at checkout and never makes the price negative. Reserved units cannot be removed, and an operator can only stock their own machines. |
 | DELETE | `/inventory/:id` | Operator | Delete an inventory row only when there are no reserved units and the machine belongs to the caller's vendor account. |
 | GET | `/overview` | Operator | Live machine, sales, revenue, low-stock, alert, restock, and recent-order summary. |
 | GET | `/forecast?days=30` | Operator | Rolling demand and days-of-stock projection (7–90 day period). |
@@ -53,7 +63,10 @@ Protected routes use `Authorization: Bearer <JWT>`. Public signup always creates
 | --- | --- | --- | --- |
 | GET | `/users` | Admin | List customer, vendor and admin accounts with `role`, `banned` and `createdAt`. Password hashes are never returned. |
 | PATCH | `/users/:id/ban` | Admin | Body: `{banned:true}` or `{banned:false}`. Banned accounts are blocked at sign-in and on every authenticated request. Administrator accounts and the caller cannot be banned. |
+| PATCH | `/users/:id/operator-request` | Admin | Review a pending customer request with `{approved:true}` or `{approved:false}`. Approval changes the customer to an operator. |
+| PATCH | `/users/:id/role` | Admin | Demote an operator to a customer with `{role:"CUSTOMER"}`. Administrator accounts and the caller cannot be changed. An operator must have all machines reassigned before demotion. Operator promotion requires an approved operator-access request. |
 | DELETE | `/users/:id` | Admin | Permanently remove a customer or vendor account. Administrator accounts and the caller cannot be removed. Removing a vendor account leaves its machines on the network but unassigns them (`vendor: null`). |
+| GET | `/users/audit-log?limit=100` | Admin | List up to 200 most recent administrator changes, including administrator identity, action, target, changed values, and timestamp. Audit records are append-only and are created for account access/role/request/deletion, machine and inventory management, catalog updates, complaint/alert resolution, and product-suggestion review. |
 
 ## Reservations and pickup
 
